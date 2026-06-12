@@ -26,7 +26,13 @@ canvas {
       // better debugging for me
       const ogalert = window.alert;
       window.alert = function(message) {
-        ogalert(document.querySelector('base')?.href.split("https://cdn.jsdelivr.net/gh/genizy/web-port@")[1]+"\n"+message)
+        const baseHref = document.querySelector('base')?.href || '';
+        const idx = baseHref.indexOf('cdn.jsdelivr.net/gh/');
+        let prefix = '';
+        if (idx !== -1) {
+          prefix = baseHref.slice(idx + 'cdn.jsdelivr.net/gh/'.length) + '\n';
+        }
+        ogalert(prefix + message);
       };
     </script>
     <meta charset="utf-8" />

@@ -4,11 +4,10 @@
 	}
 	window.addEventListener('message', (event) => {
     if (event.data.type === 'keydown') {
-        // Call the normal key-down handler
-        handleKeyDown(event.data.key);
+        if (typeof handleKeyDown === 'function') handleKeyDown(event.data.key);
     }
     if (event.data.type === 'keyup') {
-        handleKeyUp(event.data.key);
+        if (typeof handleKeyUp === 'function') handleKeyUp(event.data.key);
     }
 });
 
