@@ -56,20 +56,92 @@
   <audio id="drone" loop autoplay hidden>
     <source src="audios/AUDIO_DRONE.ogg" type="audio/ogg">
   </audio>
+  <button id="settingsBtn" aria-label="Settings" title="Settings">&#9881;</button>
+  <button id="savesBtn" aria-label="Manage save files" title="Manage save files">&#128190;</button>
   <button id="mute" aria-label="Toggle menu music">&#128266;</button>
+
+  <div id="settingsPanel" class="settings-panel" hidden>
+    <div class="settings-row">
+      <span class="settings-label">Game Speed</span>
+      <div class="settings-slider-row">
+        <span class="settings-slider-label">0.25&#215;</span>
+        <input type="range" id="speedSlider" min="0.25" max="5" step="0.25" value="1">
+        <span class="settings-slider-label" id="speedValue">1.0&#215;</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Saves Modal -->
+  <div id="savesModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="savesModalTitle">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="savesModalTitle">Save Files</h2>
+        <button id="closeSavesBtn" class="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="savesList" class="saves-list"></div>
+        <div id="saveEditor" class="save-editor" hidden>
+          <div class="editor-header">
+            <button id="editorBack" class="editor-back-btn">&#9664; Back</button>
+            <span id="editorFilename" class="editor-filename"></span>
+          </div>
+          <textarea id="editorTextarea" spellcheck="false" autocomplete="off"></textarea>
+          <div class="editor-actions">
+            <button id="editorSave" class="btn-primary">Save Changes</button>
+            <button id="editorDelete" class="btn-danger">Delete File</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer" id="savesModalFooter">
+        <button id="exportSavesBtn">Export All</button>
+        <button id="importSavesBtn">Import</button>
+        <input type="file" id="importInput" accept=".json,application/json" hidden>
+      </div>
+    </div>
+  </div>
 
   <script>
     (function() {
       const audio = document.getElementById('drone');
       const mute = document.getElementById('mute');
+      const savesBtn = document.getElementById('savesBtn');
       const backBtn = document.getElementById('backBtn');
       const iframe = document.getElementById('chapterFrame');
       const menu = document.getElementById('mainMenu');
       const logo = document.getElementById('logoContainer');
       let gamestarted = false;
+      window.__launcher = { isGameStarted: () => gamestarted };
       let selectedChapter = null;
       const rows = () => menu.querySelectorAll('.row');
       const origin = window.location.origin;
+      const SPEED_KEY = 'deltarune_speed';
+      const settingsBtn = document.getElementById('settingsBtn');
+      const settingsPanel = document.getElementById('settingsPanel');
+      const speedSlider = document.getElementById('speedSlider');
+      const speedValue = document.getElementById('speedValue');
+
+      function getSpeed() { return parseFloat(localStorage.getItem(SPEED_KEY)) || 1; }
+      function setSpeed(v) {
+        v = Math.round(v / 0.25) * 0.25;
+        v = Math.max(0.25, Math.min(5, v));
+        localStorage.setItem(SPEED_KEY, String(v));
+        speedSlider.value = v;
+        speedValue.textContent = (v < 1 ? v.toFixed(2) : v.toFixed(1)) + '\u00d7';
+      }
+      function syncSpeedFromStorage() { setSpeed(getSpeed()); }
+      speedSlider.addEventListener('input', function() { setSpeed(parseFloat(this.value)); });
+
+      function toggleSettings() {
+        settingsPanel.hidden = !settingsPanel.hidden;
+        if (!settingsPanel.hidden) syncSpeedFromStorage();
+      }
+      function closeSettings() { settingsPanel.hidden = true; }
+      settingsBtn.addEventListener('click', toggleSettings);
+      document.addEventListener('click', function(e) {
+        if (!settingsPanel.hidden && !settingsBtn.contains(e.target) && !settingsPanel.contains(e.target)) {
+          closeSettings();
+        }
+      });
 
       function updateMuteButton() {
         mute.textContent = audio.muted ? '🔇' : '🔊';
@@ -91,6 +163,8 @@
         menu.classList.add('hidden-menu');
         logo.classList.add('hidden-menu');
         mute.style.display = 'none';
+        savesBtn.style.display = 'none';
+        settingsBtn.style.display = 'block';
         backBtn.style.display = 'block';
 
         iframe.src = 'chapter' + chapter + '/index.html';
@@ -112,6 +186,9 @@
         menu.classList.remove('hidden-menu');
         logo.classList.remove('hidden-menu');
         mute.style.display = 'block';
+        savesBtn.style.display = 'block';
+        settingsBtn.style.display = 'none';
+        closeSettings();
         backBtn.style.display = 'none';
         updateMuteButton();
 
@@ -141,10 +218,18 @@
       document.addEventListener('keydown', function(event) {
         if (gamestarted) {
           if (event.key === 'Escape') {
+            if (!settingsPanel.hidden) {
+              closeSettings();
+              event.preventDefault();
+              return;
+            }
             backToMenu();
             event.preventDefault();
             return;
           }
+          if (event.key === '[') { setSpeed(getSpeed() - 0.25); event.preventDefault(); return; }
+          if (event.key === ']') { setSpeed(getSpeed() + 0.25); event.preventDefault(); return; }
+          if (event.key === '\\') { setSpeed(1); event.preventDefault(); return; }
           iframe.contentWindow.postMessage({ type: 'keydown', key: event.key }, origin);
           return;
         }
@@ -188,6 +273,315 @@
           iframe.contentWindow.postMessage({ type: 'keyup', key: e.key }, origin);
         }
       });
+    })();
+  </script>
+
+  <script>
+    // Save file manager: reads/writes the GameMaker IDBFS database (/_savedata)
+    (function() {
+      const DB_NAME = '/_savedata';
+      const STORE = 'FILE_DATA';
+      const DB_VERSION = 21;
+
+      const savesBtn = document.getElementById('savesBtn');
+      const savesModal = document.getElementById('savesModal');
+      const closeSavesBtn = document.getElementById('closeSavesBtn');
+      const savesList = document.getElementById('savesList');
+      const saveEditor = document.getElementById('saveEditor');
+      const editorFilename = document.getElementById('editorFilename');
+      const editorBack = document.getElementById('editorBack');
+      const editorTextarea = document.getElementById('editorTextarea');
+      const editorSave = document.getElementById('editorSave');
+      const editorDelete = document.getElementById('editorDelete');
+      const exportBtn = document.getElementById('exportSavesBtn');
+      const importBtn = document.getElementById('importSavesBtn');
+      const importInput = document.getElementById('importInput');
+
+      let currentKey = null;
+      let currentValue = null;
+
+      function openDB() {
+        return new Promise(function(resolve, reject) {
+          const req = indexedDB.open(DB_NAME, DB_VERSION);
+          req.onupgradeneeded = function(e) {
+            const db = e.target.result;
+            let store;
+            if (!db.objectStoreNames.contains(STORE)) {
+              store = db.createObjectStore(STORE);
+            } else {
+              store = e.target.transaction.objectStore(STORE);
+            }
+            if (!store.indexNames.contains('timestamp')) {
+              store.createIndex('timestamp', 'timestamp', { unique: false });
+            }
+          };
+          req.onsuccess = function(e) { resolve(e.target.result); };
+          req.onerror = function(e) { reject(e.target.error); };
+          req.onblocked = function() { reject(new Error('Database is locked by another tab. Close other tabs and retry.')); };
+        });
+      }
+
+      function listAll() {
+        return openDB().then(function(db) {
+          return new Promise(function(resolve, reject) {
+            const tx = db.transaction(STORE, 'readonly');
+            const items = [];
+            const req = tx.objectStore(STORE).openCursor();
+            req.onsuccess = function(e) {
+              const cursor = e.target.result;
+              if (cursor) {
+                items.push({ key: cursor.primaryKey, value: cursor.value });
+                cursor.continue();
+              } else {
+                db.close();
+                resolve(items);
+              }
+            };
+            req.onerror = function(e) { db.close(); reject(e.target.error); };
+          });
+        });
+      }
+
+      function putEntry(key, value) {
+        return openDB().then(function(db) {
+          return new Promise(function(resolve, reject) {
+            const tx = db.transaction(STORE, 'readwrite');
+            const req = tx.objectStore(STORE).put(value, key);
+            req.onsuccess = function() { db.close(); resolve(); };
+            req.onerror = function(e) { db.close(); reject(e.target.error); };
+          });
+        });
+      }
+
+      function deleteEntry(key) {
+        return openDB().then(function(db) {
+          return new Promise(function(resolve, reject) {
+            const tx = db.transaction(STORE, 'readwrite');
+            const req = tx.objectStore(STORE).delete(key);
+            req.onsuccess = function() { db.close(); resolve(); };
+            req.onerror = function(e) { db.close(); reject(e.target.error); };
+          });
+        });
+      }
+
+      function isDirectory(value) {
+        if (!value || typeof value.mode !== 'number') return false;
+        return (value.mode & 0xF000) === 0x4000; // S_IFDIR
+      }
+
+      function tryDecodeText(bytes) {
+        if (!bytes || !(bytes instanceof Uint8Array)) return null;
+        if (bytes.length === 0) return '';
+        try {
+          const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+          let controlChars = 0;
+          for (let i = 0; i < text.length; i++) {
+            const code = text.charCodeAt(i);
+            if (code < 32 && code !== 9 && code !== 10 && code !== 13) controlChars++;
+          }
+          if (text.length > 0 && controlChars / text.length > 0.02) return null;
+          return text;
+        } catch (e) {
+          return null;
+        }
+      }
+
+      function toBase64(bytes) {
+        let binary = '';
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+        }
+        return btoa(binary);
+      }
+
+      function fromBase64(b64) {
+        const binary = atob(b64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes;
+      }
+
+      function formatSize(n) {
+        if (n < 1024) return n + ' B';
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+        return (n / 1024 / 1024).toFixed(2) + ' MB';
+      }
+
+      function refreshList() {
+        saveEditor.hidden = true;
+        savesList.hidden = false;
+        savesList.innerHTML = '<div class="saves-empty">Loading...</div>';
+        listAll().then(function(items) {
+          const files = items.filter(function(it) { return !isDirectory(it.value); });
+          if (files.length === 0) {
+            savesList.innerHTML = '<div class="saves-empty">No save files found.<br><span class="saves-hint">Launch a chapter and create a save first.</span></div>';
+            return;
+          }
+          files.sort(function(a, b) { return a.key.localeCompare(b.key); });
+          savesList.innerHTML = '';
+          files.forEach(function(item) {
+            const size = item.value.contents ? item.value.contents.length : 0;
+            const isText = tryDecodeText(item.value.contents) !== null;
+            const div = document.createElement('div');
+            div.className = 'save-item';
+            div.tabIndex = 0;
+            const nameSpan = document.createElement('div');
+            nameSpan.className = 'save-name';
+            nameSpan.textContent = item.key;
+            const metaSpan = document.createElement('div');
+            metaSpan.className = 'save-meta';
+            metaSpan.textContent = formatSize(size) + ' \u00b7 ' + (isText ? 'text' : 'binary');
+            div.appendChild(nameSpan);
+            div.appendChild(metaSpan);
+            div.addEventListener('click', function() { openEditor(item.key, item.value); });
+            div.addEventListener('keydown', function(e) {
+              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openEditor(item.key, item.value); }
+            });
+            savesList.appendChild(div);
+          });
+        }).catch(function(err) {
+          savesList.innerHTML = '<div class="saves-empty">Error loading saves:<br>' + (err && err.message ? err.message : err) + '</div>';
+        });
+      }
+
+      function openEditor(key, value) {
+        currentKey = key;
+        currentValue = value;
+        editorFilename.textContent = key;
+        const text = tryDecodeText(value.contents);
+        if (text === null) {
+          const size = value.contents ? value.contents.length : 0;
+          editorTextarea.value = '[Binary file, ' + formatSize(size) + ' \u2014 cannot edit as text. Use Export All to back it up.]';
+          editorTextarea.readOnly = true;
+          editorSave.disabled = true;
+        } else {
+          editorTextarea.value = text;
+          editorTextarea.readOnly = false;
+          editorSave.disabled = false;
+        }
+        savesList.hidden = true;
+        saveEditor.hidden = false;
+        editorTextarea.focus();
+      }
+
+      editorBack.addEventListener('click', refreshList);
+
+      editorSave.addEventListener('click', function() {
+        if (!currentKey || !currentValue) return;
+        try {
+          const newBytes = new TextEncoder().encode(editorTextarea.value);
+          const newValue = {
+            contents: newBytes,
+            mode: currentValue.mode || 33206,
+            timestamp: new Date()
+          };
+          putEntry(currentKey, newValue).then(function() {
+            editorSave.textContent = 'Saved!';
+            setTimeout(function() { editorSave.textContent = 'Save Changes'; }, 1500);
+            currentValue = newValue;
+          }).catch(function(err) {
+            alert('Error saving: ' + (err && err.message ? err.message : err));
+          });
+        } catch (e) {
+          alert('Error encoding text: ' + e.message);
+        }
+      });
+
+      editorDelete.addEventListener('click', function() {
+        if (!currentKey) return;
+        if (!confirm('Delete "' + currentKey + '"?\nThis cannot be undone.')) return;
+        deleteEntry(currentKey).then(refreshList).catch(function(err) {
+          alert('Error deleting: ' + (err && err.message ? err.message : err));
+        });
+      });
+
+      exportBtn.addEventListener('click', function() {
+        listAll().then(function(items) {
+          if (items.length === 0) { alert('Nothing to export.'); return; }
+          const out = { version: 1, db: DB_NAME, exportedAt: new Date().toISOString(), files: {} };
+          items.forEach(function(item) {
+            const v = item.value || {};
+            out.files[item.key] = {
+              mode: v.mode,
+              timestamp: v.timestamp instanceof Date ? v.timestamp.toISOString() : v.timestamp,
+              contents: v.contents instanceof Uint8Array ? toBase64(v.contents) : null
+            };
+          });
+          const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'deltarune-saves-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+        }).catch(function(err) {
+          alert('Export failed: ' + (err && err.message ? err.message : err));
+        });
+      });
+
+      importBtn.addEventListener('click', function() { importInput.click(); });
+
+      importInput.addEventListener('change', function(e) {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        if (!confirm('Importing will OVERWRITE existing save files with matching names.\nContinue?')) {
+          importInput.value = '';
+          return;
+        }
+        file.text().then(function(text) {
+          const data = JSON.parse(text);
+          if (!data || !data.files || typeof data.files !== 'object') {
+            throw new Error('Invalid save file format.');
+          }
+          const entries = Object.keys(data.files);
+          const promises = entries.map(function(key) {
+            const v = data.files[key];
+            const value = {
+              mode: typeof v.mode === 'number' ? v.mode : 33206,
+              timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
+              contents: v.contents ? fromBase64(v.contents) : new Uint8Array(0)
+            };
+            return putEntry(key, value);
+          });
+          return Promise.all(promises).then(function() {
+            alert('Imported ' + entries.length + ' file(s).');
+            refreshList();
+          });
+        }).catch(function(err) {
+          alert('Import failed: ' + (err && err.message ? err.message : err));
+        }).finally(function() {
+          importInput.value = '';
+        });
+      });
+
+      function openModal() {
+        if (window.__launcher && window.__launcher.isGameStarted()) {
+          alert('Return to the main menu before managing saves.');
+          return;
+        }
+        savesModal.hidden = false;
+        refreshList();
+      }
+      function closeModal() {
+        savesModal.hidden = true;
+        currentKey = null;
+        currentValue = null;
+      }
+
+      savesBtn.addEventListener('click', openModal);
+      closeSavesBtn.addEventListener('click', closeModal);
+      savesModal.addEventListener('click', function(e) {
+        if (e.target === savesModal) closeModal();
+      });
+      document.addEventListener('keydown', function(e) {
+        if (!savesModal.hidden && e.key === 'Escape') {
+          e.stopPropagation();
+          closeModal();
+        }
+      }, true); // capture phase so it runs before launcher's keydown
     })();
   </script>
 </body>
