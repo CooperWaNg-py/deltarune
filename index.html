@@ -736,6 +736,7 @@
       }
 
       uploadBtn.addEventListener('click', function() {
+        initFirebase();
         var path = getCloudPath();
         if (!path) { alert('Enter a Cloud ID first.'); return; }
         if (!confirm('Upload all save files to the cloud? This will overwrite the cloud backup.')) return;
@@ -756,6 +757,7 @@
       });
 
       downloadBtn.addEventListener('click', function() {
+        initFirebase();
         var path = getCloudPath();
         if (!path) { alert('Enter a Cloud ID first.'); return; }
         if (!confirm('Download cloud saves? This will OVERWRITE all local saves with the cloud version.')) return;
@@ -778,17 +780,6 @@
           downloadBtn.disabled = false;
         });
       });
-
-      // Init Firebase when the saves modal is first opened
-      var firebaseInitialized = false;
-      var origOpenModal = openModal;
-      openModal = function() {
-        if (!firebaseInitialized) {
-          firebaseInitialized = true;
-          initFirebase();
-        }
-        origOpenModal();
-      };
 
       savesBtn.addEventListener('click', openModal);
       closeSavesBtn.addEventListener('click', closeModal);
