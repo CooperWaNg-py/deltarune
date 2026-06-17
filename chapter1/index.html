@@ -394,7 +394,15 @@
 	function changecolor(el) {
 		document.body.style.backgroundColor = el.value;
 	}
-	
+	window.addEventListener('message', (event) => {
+    if (event.data.type === 'keydown') {
+        if (typeof handleKeyDown === 'function') handleKeyDown(event.data.key);
+    }
+    if (event.data.type === 'keyup') {
+        if (typeof handleKeyUp === 'function') handleKeyUp(event.data.key);
+    }
+});
+
       const CHANGE_ASPECT_RATIO = true;
 		// Main Page Elements
       var bodyElement = document.getElementsByTagName("body")[0];

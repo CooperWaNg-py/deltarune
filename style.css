@@ -163,7 +163,7 @@ img {
 
 #mute { right: 10px; }
 #savesBtn { right: 70px; }
-#settingsBtn { right: 130px; }
+#settingsBtn { right: 130px; display: none; }
 
 #mute:hover,
 #savesBtn:hover,
@@ -372,6 +372,67 @@ img {
 
 .btn-danger:hover { background: #6a3a3a !important; }
 
+#tennaBtn {
+  background: #2a1a3a !important;
+  border-color: #8a4aaa !important;
+}
+
+#tennaBtn:hover { background: #3a2a4a !important; }
+
+/* Cloud sync row */
+.cloud-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #333;
+  flex-wrap: wrap;
+}
+
+.cloud-input {
+  flex: 1;
+  min-width: 120px;
+  background: #0a0a0a;
+  color: #fff;
+  border: 1px solid #555;
+  padding: 6px 8px;
+  font-family: monospace;
+  font-size: 13px;
+  border-radius: 3px;
+  outline: none;
+}
+
+.cloud-input:focus { border-color: #fefe00; }
+
+.cloud-btn {
+  background: #222;
+  color: #fff;
+  border: 1px solid #555;
+  padding: 6px 12px;
+  font-family: monospace;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background-color 0.15s ease;
+}
+
+.cloud-btn:hover { background: #333; border-color: #fefe00; }
+
+#uploadBtn { background: #1a3a2a !important; border-color: #4a8a5a !important; }
+#uploadBtn:hover { background: #2a4a3a !important; }
+#downloadBtn { background: #1a2a3a !important; border-color: #4a6a8a !important; }
+#downloadBtn:hover { background: #2a3a4a !important; }
+
+.saves-warning {
+  background: #4a3a00;
+  color: #ffcc00;
+  padding: 8px 12px;
+  font-size: 13px;
+  border-bottom: 1px solid #664d00;
+}
+
+.saves-warning[hidden] { display: none; }
+
 .saves-list {
   flex: 1;
   overflow-y: auto;
@@ -417,7 +478,24 @@ img {
   color: #888;
   font-size: 12px;
   margin-top: 3px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
+
+.save-export-one {
+  background: transparent;
+  color: #aaa;
+  border: 1px solid #555;
+  font-family: monospace;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 3px;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.save-export-one:hover { background: #333; color: #fefe00; }
 
 .save-editor {
   flex: 1;

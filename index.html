@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Deltarune Web Launcher</title>
   <link rel="stylesheet" href="style.css">
+  <!-- Firebase SDK (compat) -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
 </head>
 <body>
   <iframe id="chapterFrame" title="Deltarune Chapter" allowfullscreen></iframe>
@@ -78,7 +81,13 @@
         <h2 id="savesModalTitle">Save Files</h2>
         <button id="closeSavesBtn" class="modal-close" aria-label="Close">&times;</button>
       </div>
+      <div id="cloudRow" class="cloud-row">
+        <input type="text" id="cloudId" placeholder="Cloud ID (e.g. player1)" class="cloud-input">
+        <button id="uploadBtn" class="cloud-btn">&#9729; Upload</button>
+        <button id="downloadBtn" class="cloud-btn">&#9729; Download</button>
+      </div>
       <div class="modal-body">
+        <div id="savesWarning" class="saves-warning" hidden>Game is running — avoid editing while the game is saving.</div>
         <div id="savesList" class="saves-list"></div>
         <div id="saveEditor" class="save-editor" hidden>
           <div class="editor-header">
@@ -93,6 +102,7 @@
         </div>
       </div>
       <div class="modal-footer" id="savesModalFooter">
+        <button id="tennaBtn">Tenna Editor</button>
         <button id="exportSavesBtn">Export All</button>
         <button id="importSavesBtn">Import</button>
         <input type="file" id="importInput" accept=".json,application/json" hidden>
@@ -163,7 +173,6 @@
         menu.classList.add('hidden-menu');
         logo.classList.add('hidden-menu');
         mute.style.display = 'none';
-        savesBtn.style.display = 'none';
         settingsBtn.style.display = 'block';
         backBtn.style.display = 'block';
 
@@ -186,7 +195,6 @@
         menu.classList.remove('hidden-menu');
         logo.classList.remove('hidden-menu');
         mute.style.display = 'block';
-        savesBtn.style.display = 'block';
         settingsBtn.style.display = 'none';
         closeSettings();
         backBtn.style.display = 'none';
@@ -287,6 +295,7 @@
       const savesModal = document.getElementById('savesModal');
       const closeSavesBtn = document.getElementById('closeSavesBtn');
       const savesList = document.getElementById('savesList');
+      const savesWarning = document.getElementById('savesWarning');
       const saveEditor = document.getElementById('saveEditor');
       const editorFilename = document.getElementById('editorFilename');
       const editorBack = document.getElementById('editorBack');
@@ -296,6 +305,7 @@
       const exportBtn = document.getElementById('exportSavesBtn');
       const importBtn = document.getElementById('importSavesBtn');
       const importInput = document.getElementById('importInput');
+      const tennaBtn = document.getElementById('tennaBtn');
 
       let currentKey = null;
       let currentValue = null;
@@ -408,6 +418,20 @@
         return (n / 1024 / 1024).toFixed(2) + ' MB';
       }
 
+      function saveSingleFile(key, value) {
+        if (!value || !value.contents) { alert('Empty file.'); return; }
+        var name = key.replace(/[\\\/]/g, '_').replace(/^_+/, '') || 'save';
+        var blob = new Blob([value.contents], { type: 'application/octet-stream' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+      }
+
       function refreshList() {
         saveEditor.hidden = true;
         savesList.hidden = false;
@@ -429,11 +453,21 @@
             const nameSpan = document.createElement('div');
             nameSpan.className = 'save-name';
             nameSpan.textContent = item.key;
-            const metaSpan = document.createElement('div');
-            metaSpan.className = 'save-meta';
+            const row2 = document.createElement('div');
+            row2.className = 'save-meta';
+            const metaSpan = document.createElement('span');
             metaSpan.textContent = formatSize(size) + ' \u00b7 ' + (isText ? 'text' : 'binary');
+            row2.appendChild(metaSpan);
+            const exportOne = document.createElement('button');
+            exportOne.className = 'save-export-one';
+            exportOne.textContent = 'Export';
+            exportOne.addEventListener('click', function(e) {
+              e.stopPropagation();
+              saveSingleFile(item.key, item.value);
+            });
+            row2.appendChild(exportOne);
             div.appendChild(nameSpan);
-            div.appendChild(metaSpan);
+            div.appendChild(row2);
             div.addEventListener('click', function() { openEditor(item.key, item.value); });
             div.addEventListener('keydown', function(e) {
               if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openEditor(item.key, item.value); }
@@ -557,19 +591,201 @@
         });
       });
 
-      function openModal() {
-        if (window.__launcher && window.__launcher.isGameStarted()) {
-          alert('Return to the main menu before managing saves.');
-          return;
+      var tennaWindow = null;
+
+      function openTennaEditor(key, value) {
+        if (!value || !value.contents) { alert('Select a save file first.'); return; }
+        if (tennaWindow && !tennaWindow.closed) { tennaWindow.close(); }
+        tennaWindow = window.open('/tenna/', 'tenna-editor', 'width=1400,height=900');
+        if (!tennaWindow) { alert('Pop-up blocked. Allow pop-ups for this site.'); return; }
+
+        var poll = setInterval(function() {
+          if (tennaWindow.closed) { clearInterval(poll); return; }
+          try { tennaWindow.postMessage({ type: 'tenna-open', saveData: { bytes: value.contents, filename: key } }, '*'); }
+          catch(e) { clearInterval(poll); return; }
+          clearInterval(poll);
+        }, 200);
+
+        // Set a timeout for the ready message
+        var timeout = setTimeout(function() {
+          clearInterval(poll);
+          alert('Tenna Editor took too long to load. Try again.');
+        }, 15000);
+
+        window.addEventListener('message', function tennaReady(e) {
+          if (e.data && e.data.type === 'tenna-ready') {
+            clearTimeout(timeout);
+            clearInterval(poll);
+            tennaWindow.postMessage({ type: 'tenna-open', saveData: { bytes: value.contents, filename: key } }, '*');
+            window.removeEventListener('message', tennaReady);
+          }
+        });
+      }
+
+      // Listen for exported saves from Tenna Editor
+      window.addEventListener('message', function(e) {
+        if (e.data && e.data.type === 'tenna-exported' && e.data.bytes) {
+          var key = e.data.filename || 'imported.sav';
+          var val = {
+            contents: e.data.bytes,
+            mode: 33206,
+            timestamp: new Date()
+          };
+          putEntry(key, val).then(function() {
+            alert('Save updated from Tenna Editor.');
+            refreshList();
+          }).catch(function(err) {
+            alert('Error saving: ' + (err && err.message ? err.message : err));
+          });
         }
+      });
+
+      tennaBtn.addEventListener('click', function() {
+        if (currentKey && currentValue) {
+          openTennaEditor(currentKey, currentValue);
+        } else {
+          alert('Select a save file first, then click Tenna Editor.');
+        }
+      });
+
+      function openModal() {
         savesModal.hidden = false;
+        if (window.__launcher && window.__launcher.isGameStarted()) {
+          savesWarning.hidden = false;
+        } else {
+          savesWarning.hidden = true;
+        }
         refreshList();
       }
       function closeModal() {
         savesModal.hidden = true;
+        savesWarning.hidden = true;
         currentKey = null;
         currentValue = null;
       }
+
+      // ── Firebase config ──────────────────────────────────────────────
+      // TODO: Replace with your Firebase project config from
+      //       https://console.firebase.google.com/project/_/settings/general
+      var firebaseConfig = {
+        apiKey: ''AIzaSyAZAHWd4_1gilshlbmzysbVGlG,
+        authDomain: 'deltarune-save.firebaseapp.com',
+        databaseURL: 'https://deltarune-save-default-rtdb.firebaseio.com',
+        projectId: 'deltarune-save',
+        storageBucket: 'deltarune-save.firebasestorage.app',
+        messagingSenderId: '537198564305',
+        appId: '1:537198564305:web:c66268e1cdf27f76f946f0',
+      };
+
+      var rtdb = null;
+      var cloudIdInput = document.getElementById('cloudId');
+      var uploadBtn = document.getElementById('uploadBtn');
+      var downloadBtn = document.getElementById('downloadBtn');
+
+      function getCloudPath() {
+        var id = cloudIdInput.value.trim();
+        if (!id) return null;
+        return 'saves/' + id.replace(/[\.\#\$\/\[\]]/g, '_');
+      }
+
+      function initFirebase() {
+        if (firebaseConfig.apiKey === 'YOUR_API_KEY') return;
+        if (rtdb) return;
+        try {
+          rtdb = firebase.initializeApp(firebaseConfig).database();
+        } catch (e) {
+          console.warn('Firebase init failed:', e);
+        }
+      }
+
+      function getAllSavesAsObject() {
+        return listAll().then(function(items) {
+          var out = { version: 2, exportedAt: new Date().toISOString(), files: {} };
+          items.forEach(function(item) {
+            var v = item.value || {};
+            out.files[item.key] = {
+              mode: v.mode,
+              timestamp: v.timestamp instanceof Date ? v.timestamp.toISOString() : v.timestamp,
+              contents: v.contents instanceof Uint8Array ? toBase64(v.contents) : null
+            };
+          });
+          return out;
+        });
+      }
+
+      function importSavesFromObject(data) {
+        if (!data || !data.files || typeof data.files !== 'object') {
+          return Promise.reject(new Error('Invalid cloud save data.'));
+        }
+        var entries = Object.keys(data.files);
+        var promises = entries.map(function(key) {
+          var v = data.files[key];
+          var value = {
+            mode: typeof v.mode === 'number' ? v.mode : 33206,
+            timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
+            contents: v.contents ? fromBase64(v.contents) : new Uint8Array(0)
+          };
+          return putEntry(key, value);
+        });
+        return Promise.all(promises).then(function() {
+          return entries.length;
+        });
+      }
+
+      uploadBtn.addEventListener('click', function() {
+        var path = getCloudPath();
+        if (!path) { alert('Enter a Cloud ID first.'); return; }
+        if (!confirm('Upload all save files to the cloud? This will overwrite the cloud backup.')) return;
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = 'Uploading...';
+        getAllSavesAsObject().then(function(data) {
+          data.uploadedAt = new Date().toISOString();
+          return rtdb.ref(path).set(data);
+        }).then(function() {
+          uploadBtn.textContent = '\u2601 Upload';
+          uploadBtn.disabled = false;
+          alert('Saves uploaded successfully.');
+        }).catch(function(err) {
+          uploadBtn.textContent = '\u2601 Upload';
+          uploadBtn.disabled = false;
+          alert('Upload failed: ' + (err && err.message ? err.message : err));
+        });
+      });
+
+      downloadBtn.addEventListener('click', function() {
+        var path = getCloudPath();
+        if (!path) { alert('Enter a Cloud ID first.'); return; }
+        if (!confirm('Download cloud saves? This will OVERWRITE all local saves with the cloud version.')) return;
+        downloadBtn.disabled = true;
+        downloadBtn.textContent = 'Downloading...';
+        rtdb.ref(path).once('value').then(function(snapshot) {
+          var data = snapshot.val();
+          if (!data) {
+            alert('No cloud saves found for this ID.');
+            return;
+          }
+          return importSavesFromObject(data).then(function(count) {
+            alert('Downloaded ' + count + ' file(s) from cloud.');
+            refreshList();
+          });
+        }).catch(function(err) {
+          alert('Download failed: ' + (err && err.message ? err.message : err));
+        }).finally(function() {
+          downloadBtn.textContent = '\u2601 Download';
+          downloadBtn.disabled = false;
+        });
+      });
+
+      // Init Firebase when the saves modal is first opened
+      var firebaseInitialized = false;
+      var origOpenModal = openModal;
+      openModal = function() {
+        if (!firebaseInitialized) {
+          firebaseInitialized = true;
+          initFirebase();
+        }
+        origOpenModal();
+      };
 
       savesBtn.addEventListener('click', openModal);
       closeSavesBtn.addEventListener('click', closeModal);
