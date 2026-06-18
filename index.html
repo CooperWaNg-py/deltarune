@@ -5,9 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Deltarune Web Launcher</title>
   <link rel="stylesheet" href="style.css">
-  <!-- Firebase SDK (compat) -->
-  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
 </head>
 <body>
   <iframe id="chapterFrame" title="Deltarune Chapter" allowfullscreen></iframe>
@@ -919,11 +916,37 @@
       function initFirebase() {
         if (firebaseConfig.apiKey === 'YOUR_API_KEY') return;
         if (rtdb) return;
+        if (typeof firebase === 'undefined') {
+          uploadBtn.disabled = true;
+          downloadBtn.disabled = true;
+          loadFirebaseSDK().then(function() { return initFirebase(); }).catch(function(e) {
+            console.warn('Firebase load failed:', e);
+            uploadBtn.disabled = false;
+            downloadBtn.disabled = false;
+          });
+          return;
+        }
         try {
           rtdb = firebase.initializeApp(firebaseConfig).database();
         } catch (e) {
           console.warn('Firebase init failed:', e);
         }
+      }
+
+      function loadFirebaseSDK() {
+        return new Promise(function(resolve, reject) {
+          var app = document.createElement('script');
+          app.src = 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js';
+          app.onload = function() {
+            var db = document.createElement('script');
+            db.src = 'https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js';
+            db.onload = resolve;
+            db.onerror = reject;
+            document.body.appendChild(db);
+          };
+          app.onerror = reject;
+          document.body.appendChild(app);
+        });
       }
 
       // Encode/decode file keys for RTDB (forbidden: . # $ / [ ])
@@ -969,18 +992,24 @@
         if (!data || !data.files || typeof data.files !== 'object') {
           return Promise.reject(new Error('Invalid cloud save data.'));
         }
-        var entries = Object.keys(data.files);
-        var promises = entries.map(function(key) {
-          var v = data.files[key];
-          var value = {
-            mode: typeof v.mode === 'number' ? v.mode : 33206,
-            timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
-            contents: v.contents ? fromBase64(v.contents) : new Uint8Array(0)
-          };
-          return putEntry(decodeKey(key), value);
-        });
-        return Promise.all(promises).then(function() {
-          return entries.length;
+        return listAll().then(function(localItems) {
+          var localKeys = {};
+          localItems.forEach(function(item) { localKeys[item.key] = true; });
+          var entries = Object.keys(data.files).filter(function(key) {
+            return localKeys[decodeKey(key)];
+          });
+          var promises = entries.map(function(key) {
+            var v = data.files[key];
+            var value = {
+              mode: typeof v.mode === 'number' ? v.mode : 33206,
+              timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
+              contents: v.contents ? fromBase64(v.contents) : new Uint8Array(0)
+            };
+            return putEntry(decodeKey(key), value);
+          });
+          return Promise.all(promises).then(function() {
+            return { updated: entries.length, total: Object.keys(data.files).length };
+          });
         });
       }
 
@@ -1010,7 +1039,7 @@
         initFirebase();
         var path = getCloudPath();
         if (!path) { alert('Enter a Cloud ID first.'); return; }
-        if (!confirm('Download cloud saves? This will OVERWRITE all local saves with the cloud version.')) return;
+        if (!confirm('Download cloud saves? Only local files that also exist in the cloud will be updated.')) return;
         downloadBtn.disabled = true;
         downloadBtn.innerHTML = '&#8987; Downloading...';
         rtdb.ref(path).once('value').then(function(snapshot) {
@@ -1019,11 +1048,13 @@
             alert('No cloud saves found for this ID.');
             return;
           }
-          return importSavesFromObject(data).then(function(count) {
+          return importSavesFromObject(data).then(function(result) {
             downloadBtn.innerHTML = '\u2601 Download';
             downloadBtn.disabled = false;
-            if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Downloaded ' + count + ' file(s).');
-            else alert('Downloaded ' + count + ' file(s) from cloud.');
+            var msg = 'Updated ' + result.updated + ' file(s) from cloud.';
+            if (result.updated < result.total) msg += ' (' + (result.total - result.updated) + ' cloud-only files skipped)';
+            if (window.__launcher && window.__launcher.toast) window.__launcher.toast(msg);
+            else alert(msg);
             refreshList();
           });
         }).catch(function(err) {
