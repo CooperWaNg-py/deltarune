@@ -298,7 +298,12 @@
     (function() {
       const DB_NAME = '/_savedata';
       const STORE = 'FILE_DATA';
-      const DB_VERSION = 21;
+
+      if (indexedDB.databases) {
+        indexedDB.databases().then(function(dbs) {
+          console.log('[Saves] Available databases:', dbs.map(function(d) { return d.name + ' v' + d.version; }));
+        });
+      }
 
       const savesBtn = document.getElementById('savesBtn');
       const savesModal = document.getElementById('savesModal');
@@ -322,20 +327,23 @@
 
       function openDB() {
         return new Promise(function(resolve, reject) {
-          const req = indexedDB.open(DB_NAME, DB_VERSION);
-          req.onupgradeneeded = function(e) {
-            const db = e.target.result;
-            let store;
+          // Try without explicit version first to avoid VersionError
+          var req = indexedDB.open(DB_NAME);
+          req.onsuccess = function(e) {
+            var db = e.target.result;
             if (!db.objectStoreNames.contains(STORE)) {
-              store = db.createObjectStore(STORE);
+              db.close();
+              // Create the store with a version bump
+              var req2 = indexedDB.open(DB_NAME, db.version + 1);
+              req2.onupgradeneeded = function(e2) {
+                e2.target.result.createObjectStore(STORE);
+              };
+              req2.onsuccess = function(e2) { resolve(e2.target.result); };
+              req2.onerror = function(e2) { reject(e2.target.error); };
             } else {
-              store = e.target.transaction.objectStore(STORE);
-            }
-            if (!store.indexNames.contains('timestamp')) {
-              store.createIndex('timestamp', 'timestamp', { unique: false });
+              resolve(db);
             }
           };
-          req.onsuccess = function(e) { resolve(e.target.result); };
           req.onerror = function(e) { reject(e.target.error); };
           req.onblocked = function() { reject(new Error('Database is locked by another tab. Close other tabs and retry.')); };
         });
@@ -449,7 +457,9 @@
         savesList.hidden = false;
         savesList.innerHTML = '<div class="saves-empty">Loading...</div>';
         listAll().then(function(items) {
+          console.log('[Saves] Found', items.length, 'entries total');
           const files = items.filter(function(it) { return !isDirectory(it.value); });
+          console.log('[Saves]', files.length, 'files after filtering dirs');
           if (files.length === 0) {
             savesList.innerHTML = '<div class="saves-empty">No save files found.<br><span class="saves-hint">Launch a chapter and create a save first.</span></div>';
             return;
