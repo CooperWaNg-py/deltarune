@@ -56,7 +56,7 @@
     </a>
   </nav>
 
-  <div id="versionTag">v1.0.0</div>
+  <div id="versionTag"></div>
 
   <audio id="drone" loop autoplay hidden>
     <source src="audios/AUDIO_DRONE.ogg" type="audio/ogg">
@@ -132,6 +132,7 @@
       const speedSlider = document.getElementById('speedSlider');
       const speedValue = document.getElementById('speedValue');
       const versionTag = document.getElementById('versionTag');
+      versionTag.textContent = 'v0.1.0 (' + document.lastModified.split(' ')[0] + ')';
 
       function getSpeed() { return parseFloat(localStorage.getItem(SPEED_KEY)) || 1; }
       function setSpeed(v) {
@@ -512,19 +513,26 @@ function toHex(bytes) {
         editorFilename.textContent = key;
         try {
           var bytes = value && value.contents;
-          const text = tryDecodeText(bytes);
-          if (text === null) {
-            isHexMode = true;
-            editorTextarea.value = toHex(bytes);
-          } else {
+          if (!bytes || !bytes.length) {
+            editorTextarea.value = '[File is empty or has no data]';
+            editorTextarea.readOnly = true;
+            editorSave.disabled = true;
             isHexMode = false;
-            editorTextarea.value = text;
+          } else {
+            const text = tryDecodeText(bytes);
+            if (text === null) {
+              isHexMode = true;
+              editorTextarea.value = toHex(bytes);
+            } else {
+              isHexMode = false;
+              editorTextarea.value = text;
+            }
+            editorTextarea.readOnly = false;
+            editorSave.disabled = false;
           }
-          editorTextarea.readOnly = false;
-          editorSave.disabled = false;
         } catch (e) {
           isHexMode = false;
-          editorTextarea.value = '[Error opening file: ' + (e && e.message ? e.message : e) + ']';
+          editorTextarea.value = '[Error: ' + (e && e.message ? e.message : e) + ']';
           editorTextarea.readOnly = true;
           editorSave.disabled = true;
         }
