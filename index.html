@@ -56,6 +56,8 @@
     </a>
   </nav>
 
+  <div id="versionTag">v1.0.0</div>
+
   <audio id="drone" loop autoplay hidden>
     <source src="audios/AUDIO_DRONE.ogg" type="audio/ogg">
   </audio>
@@ -129,6 +131,7 @@
       const settingsPanel = document.getElementById('settingsPanel');
       const speedSlider = document.getElementById('speedSlider');
       const speedValue = document.getElementById('speedValue');
+      const versionTag = document.getElementById('versionTag');
 
       function getSpeed() { return parseFloat(localStorage.getItem(SPEED_KEY)) || 1; }
       function setSpeed(v) {
@@ -178,6 +181,7 @@
         mute.style.display = 'none';
         settingsBtn.style.display = 'block';
         backBtn.style.display = 'block';
+        versionTag.style.display = 'none';
 
         iframe.src = 'chapter' + chapter + '/index.html';
         iframe.classList.add('active');
@@ -201,6 +205,7 @@
         settingsBtn.style.display = 'none';
         closeSettings();
         backBtn.style.display = 'none';
+        versionTag.style.display = 'block';
         updateMuteButton();
 
         var first = rows()[0];
