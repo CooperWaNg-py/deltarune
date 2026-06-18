@@ -145,15 +145,15 @@
       function syncSpeedFromStorage() { setSpeed(getSpeed()); }
       speedSlider.addEventListener('input', function() { setSpeed(parseFloat(this.value)); });
 
-      function toggleSettings() {
-        settingsPanel.hidden = !settingsPanel.hidden;
-        if (!settingsPanel.hidden) {
-          settingsBtn.blur();
-          syncSpeedFromStorage();
-        }
+      function openSettings() {
+        settingsPanel.hidden = false;
+        syncSpeedFromStorage();
+        speedSlider.focus();
       }
       function closeSettings() { settingsPanel.hidden = true; }
-      settingsBtn.addEventListener('click', toggleSettings);
+      settingsBtn.addEventListener('click', function(e) {
+        if (settingsPanel.hidden) openSettings();
+      });
       document.addEventListener('click', function(e) {
         if (!settingsPanel.hidden && !settingsBtn.contains(e.target) && !settingsPanel.contains(e.target)) {
           closeSettings();
@@ -519,6 +519,7 @@ function toHex(bytes) {
         editorFilename.textContent = key;
         try {
           var bytes = value && value.contents;
+          if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
           if (!bytes || !bytes.length) {
             editorTextarea.value = '[File is empty or has no data]';
             editorTextarea.readOnly = true;
