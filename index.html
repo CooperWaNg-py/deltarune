@@ -132,7 +132,7 @@
       const speedSlider = document.getElementById('speedSlider');
       const speedValue = document.getElementById('speedValue');
       const versionTag = document.getElementById('versionTag');
-      versionTag.textContent = 'v0.1.0 (' + document.lastModified.split(' ')[0] + ')';
+      versionTag.textContent = 'v0.1.1 (' + document.lastModified.split(' ')[0] + ')';
 
       function getSpeed() { return parseFloat(localStorage.getItem(SPEED_KEY)) || 1; }
       function setSpeed(v) {
@@ -653,6 +653,9 @@ function toHex(bytes) {
         tennaWindow = window.open('tenna/', 'tenna-editor', 'width=1400,height=900');
         if (!tennaWindow) { alert('Pop-up blocked. Allow pop-ups for this site.'); return; }
 
+        var bytes = value.contents;
+        if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
+
         var timeout = setTimeout(function() {
           alert('Tenna Editor took too long to load. Try again.');
         }, 15000);
@@ -661,7 +664,7 @@ function toHex(bytes) {
           if (e.data && e.data.type === 'tenna-ready' && e.source === tennaWindow) {
             clearTimeout(timeout);
             window.removeEventListener('message', handler);
-            tennaWindow.postMessage({ type: 'tenna-open', saveData: { bytes: value.contents, filename: key } }, '*');
+            tennaWindow.postMessage({ type: 'tenna-open', saveData: { bytes: bytes, filename: key } }, '*');
           }
         }
         window.addEventListener('message', handler);
