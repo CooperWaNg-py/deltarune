@@ -74,7 +74,20 @@
         <span class="settings-slider-label" id="speedValue">1.0&#215;</span>
       </div>
     </div>
+    <div class="settings-row" style="margin-top:10px">
+      <span class="settings-label">Volume</span>
+      <div class="settings-slider-row">
+        <span class="settings-slider-label">0%</span>
+        <input type="range" id="volumeSlider" min="0" max="100" step="5" value="100">
+        <span class="settings-slider-label" id="volumeValue">100%</span>
+      </div>
+    </div>
+    <div class="settings-row" style="margin-top:10px">
+      <button id="fullscreenBtn" class="settings-btn">Fullscreen</button>
+    </div>
   </div>
+
+  <div id="toastContainer" class="toast-container"></div>
 
   <!-- Saves Modal -->
   <div id="savesModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="savesModalTitle">
@@ -90,6 +103,10 @@
       </div>
       <div class="modal-body">
         <div id="savesWarning" class="saves-warning" hidden>Game is running — avoid editing while the game is saving.</div>
+        <div class="saves-search-row">
+          <input type="text" id="savesSearch" class="saves-search" placeholder="Filter filenames..." spellcheck="false">
+          <span id="savesCount" class="saves-count"></span>
+        </div>
         <div id="savesList" class="saves-list"></div>
         <div id="saveEditor" class="save-editor" hidden>
           <div class="editor-header">
@@ -102,6 +119,7 @@
             <button id="editorDelete" class="btn-danger">Delete File</button>
           </div>
         </div>
+        <div id="hexPreview" class="hex-preview" hidden></div>
       </div>
       <div class="modal-footer" id="savesModalFooter">
         <button id="tennaBtn">Tenna Editor</button>
@@ -132,7 +150,7 @@
       const speedSlider = document.getElementById('speedSlider');
       const speedValue = document.getElementById('speedValue');
       const versionTag = document.getElementById('versionTag');
-      versionTag.textContent = 'v0.1.1 (' + document.lastModified.split(' ')[0] + ')';
+      versionTag.textContent = 'v0.2.0 (' + document.lastModified.split(' ')[0] + ')';
 
       function getSpeed() { return parseFloat(localStorage.getItem(SPEED_KEY)) || 1; }
       function setSpeed(v) {
@@ -160,6 +178,32 @@
         }
       });
 
+      var volumeSlider = document.getElementById('volumeSlider');
+      var volumeValue = document.getElementById('volumeValue');
+      var VOLUME_KEY = 'deltarune_volume';
+      function getVolume() { return parseFloat(localStorage.getItem(VOLUME_KEY)) || 100; }
+      function setVolume(v) {
+        v = Math.round(Math.max(0, Math.min(100, v)));
+        localStorage.setItem(VOLUME_KEY, String(v));
+        volumeSlider.value = v;
+        volumeValue.textContent = v + '%';
+        if (gamestarted) {
+          try { iframe.contentWindow.postMessage({ type: 'volume', volume: v / 100 }, origin); } catch(e) {}
+        }
+      }
+      volumeSlider.addEventListener('input', function() { setVolume(parseFloat(this.value)); });
+      setVolume(getVolume());
+
+      var fullscreenBtn = document.getElementById('fullscreenBtn');
+      fullscreenBtn.addEventListener('click', function() {
+        var el = document.documentElement;
+        if (document.fullscreenElement) {
+          document.exitFullscreen().catch(function(){});
+        } else {
+          el.requestFullscreen().catch(function(){});
+        }
+      });
+
       function updateMuteButton() {
         mute.textContent = audio.muted ? '🔇' : '🔊';
       }
@@ -171,6 +215,18 @@
           updateMuteButton();
         }
       });
+
+      function toast(msg, duration) {
+        duration = duration || 3000;
+        var el = document.createElement('div');
+        el.className = 'toast';
+        el.textContent = msg;
+        var c = document.getElementById('toastContainer');
+        if (!c) return;
+        c.appendChild(el);
+        setTimeout(function() { el.classList.add('toast-hide'); setTimeout(function() { el.remove(); }, 300); }, duration);
+      }
+      window.__launcher.toast = toast;
 
       window.loadChapter = function(chapter) {
         if (gamestarted) return;
@@ -323,7 +379,19 @@
 
       let currentKey = null;
       let currentValue = null;
+      let currentOriginalText = null;
       let isHexMode = false;
+      let isDirty = false;
+      let saveTimer = null;
+
+      var savesSearch = document.getElementById('savesSearch');
+      var savesCount = document.getElementById('savesCount');
+
+      function markDirty() { isDirty = true; }
+      function checkUnsaved() {
+        if (isDirty && !confirm('You have unsaved changes. Discard them?')) return false;
+        return true;
+      }
 
       function openDB() {
         return new Promise(function(resolve, reject) {
@@ -412,11 +480,29 @@
             else if (code < 8) bad++;
             else if (code > 13 && code < 32) bad++;
           }
-          if (bad / text.length > 0.05) return null;
-          return text;
+          if (bad / text.length <= 0.05) return text;
+          // fallback: decode as latin-1 (accepts any byte)
+          var fallback = '';
+          for (var i = 0; i < bytes.length; i++) fallback += String.fromCharCode(bytes[i]);
+          bad = 0;
+          for (var i = 0; i < fallback.length; i++) {
+            var code = fallback.charCodeAt(i);
+            if (code < 8) bad++;
+            else if (code > 13 && code < 32) bad++;
+          }
+          if (bad / fallback.length > 0.05) return null;
+          return fallback;
         } catch (e) {
           return null;
         }
+      }
+
+      function toHexInline(bytes) {
+        if (!bytes) return '';
+        if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
+        var hex = '';
+        for (var i = 0; i < bytes.length; i++) hex += ('00' + (bytes[i] || 0).toString(16)).slice(-2);
+        return hex;
       }
 
       function toBase64(bytes) {
@@ -460,31 +546,65 @@
         savesList.hidden = false;
         savesList.innerHTML = '<div class="saves-empty">Loading...</div>';
         listAll().then(function(items) {
-          console.log('[Saves] Found', items.length, 'entries total');
+          var filter = savesSearch.value.toLowerCase().trim();
           const files = items.filter(function(it) { return !isDirectory(it.value); });
-          console.log('[Saves]', files.length, 'files after filtering dirs');
           if (files.length === 0) {
             savesList.innerHTML = '<div class="saves-empty">No save files found.<br><span class="saves-hint">Launch a chapter and create a save first.</span></div>';
+            savesCount.textContent = '';
             return;
           }
-          files.sort(function(a, b) { return a.key.localeCompare(b.key); });
+          var filtered = files;
+          if (filter) {
+            filtered = files.filter(function(f) { return f.key.toLowerCase().indexOf(filter) !== -1; });
+          }
+          savesCount.textContent = filtered.length + ' / ' + files.length + ' files';
+          if (filtered.length === 0) {
+            savesList.innerHTML = '<div class="saves-empty">No files match filter.</div>';
+            return;
+          }
+          filtered.sort(function(a, b) { return a.key.localeCompare(b.key); });
           savesList.innerHTML = '';
-          files.forEach(function(item) {
+          filtered.forEach(function(item) {
             var data = item.value && item.value.contents;
             if (data instanceof ArrayBuffer) data = new Uint8Array(data);
             var size = data ? data.length : 0;
-            const isText = tryDecodeText(data) !== null;
+            const text = tryDecodeText(data);
+            const isText = text !== null;
+            var tag = getChapterTag(item.key);
+            var preview = '';
+            if (data && data.length > 0) {
+              if (isText) {
+                var lines = text.split('\n');
+                preview = lines.slice(0, 3).map(function(l) { return l.trim().substring(0, 80); }).filter(Boolean).join(' | ');
+              } else {
+                var hex = '';
+                for (var pi = 0; pi < Math.min(8, data.length); pi++) hex += ('00' + data[pi].toString(16)).slice(-2) + ' ';
+                preview = hex.trim() + '...';
+              }
+            }
             const div = document.createElement('div');
             div.className = 'save-item';
             div.tabIndex = 0;
             const nameSpan = document.createElement('div');
             nameSpan.className = 'save-name';
             nameSpan.textContent = item.key;
+            if (tag) {
+              var tagSpan = document.createElement('span');
+              tagSpan.className = 'save-chapter-tag';
+              tagSpan.textContent = tag;
+              nameSpan.appendChild(tagSpan);
+            }
             const row2 = document.createElement('div');
             row2.className = 'save-meta';
             const metaSpan = document.createElement('span');
             metaSpan.textContent = formatSize(size) + ' \u00b7 ' + (isText ? 'text' : 'binary');
             row2.appendChild(metaSpan);
+            if (preview) {
+              var prevSpan = document.createElement('div');
+              prevSpan.className = 'save-preview';
+              prevSpan.textContent = preview;
+              row2.appendChild(prevSpan);
+            }
             const exportOne = document.createElement('button');
             exportOne.className = 'save-export-one';
             exportOne.textContent = 'Export';
@@ -506,19 +626,20 @@
         });
       }
 
-function toHex(bytes) {
-    if (!bytes) return '[No data]';
-    if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
-    if (typeof bytes.length !== 'number') return '[No data]';
-    var hex = '';
-    for (var i = 0; i < bytes.length; i++) {
-      hex += ('00' + (bytes[i] || 0).toString(16)).slice(-2);
-    }
-    return hex || '[Empty]';
-  }
+      savesSearch.addEventListener('input', refreshList);
+
+      function getChapterTag(key) {
+        var m = key.match(/filech(\d)/);
+        if (m) return 'Ch. ' + m[1];
+        if (key.indexOf('ch1') !== -1 || key.indexOf('chapter1') !== -1) return 'Ch. 1';
+        if (key.indexOf('ch2') !== -1 || key.indexOf('chapter2') !== -1) return 'Ch. 2';
+        if (key.indexOf('ch3') !== -1 || key.indexOf('chapter3') !== -1) return 'Ch. 3';
+        if (key.indexOf('ch4') !== -1 || key.indexOf('chapter4') !== -1) return 'Ch. 4';
+        return '';
+      }
 
       function fromHex(hex) {
-        hex = hex.replace(/\s+/g, '');
+        hex = hex.replace(/[^0-9a-fA-F]/g, '');
         var bytes = new Uint8Array(Math.ceil(hex.length / 2));
         for (var i = 0; i < bytes.length; i++) {
           bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
@@ -526,10 +647,33 @@ function toHex(bytes) {
         return bytes;
       }
 
+      var hexPreview = document.getElementById('hexPreview');
+
+      function formatHexPreview(bytes) {
+        if (typeof bytes.length !== 'number' || bytes.length === 0) return '';
+        var out = '', ascii = '';
+        for (var i = 0; i < Math.min(256, bytes.length); i++) {
+          if (i % 16 === 0) {
+            if (i > 0) out += '  ' + ascii + '\n';
+            ascii = '';
+            out += ('00000000' + i.toString(16)).slice(-8) + ': ';
+          }
+          out += ('00' + (bytes[i] || 0).toString(16)).slice(-2) + ' ';
+          var c = bytes[i];
+          ascii += (c >= 32 && c <= 126) ? String.fromCharCode(c) : '.';
+        }
+        var pad = 16 - (bytes.length % 16 || 16);
+        for (var j = 0; j < pad; j++) out += '   ';
+        out += '  ' + ascii;
+        if (bytes.length > 256) out += '\n... (' + bytes.length + ' bytes total)';
+        return out;
+      }
+
       function openEditor(key, value) {
         currentKey = key;
         currentValue = value;
         editorFilename.textContent = key;
+        hexPreview.hidden = true;
         try {
           var bytes = value && value.contents;
           if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
@@ -542,7 +686,11 @@ function toHex(bytes) {
             const text = tryDecodeText(bytes);
             if (text === null) {
               isHexMode = true;
-              editorTextarea.value = toHex(bytes);
+              editorTextarea.value = toHexInline(bytes);
+              hexPreview.textContent = formatHexPreview(bytes);
+              hexPreview.hidden = false;
+              editorTextarea.readOnly = false;
+              editorSave.disabled = false;
             } else {
               isHexMode = false;
               editorTextarea.value = text;
@@ -559,9 +707,15 @@ function toHex(bytes) {
         savesList.hidden = true;
         saveEditor.hidden = false;
         editorTextarea.focus();
+        isDirty = false;
+        currentOriginalText = editorTextarea.value;
       }
 
-      editorBack.addEventListener('click', refreshList);
+      editorTextarea.addEventListener('input', markDirty);
+
+      editorBack.addEventListener('click', function() {
+        if (checkUnsaved()) refreshList();
+      });
 
       editorSave.addEventListener('click', function() {
         if (!currentKey || !currentValue) return;
@@ -572,15 +726,22 @@ function toHex(bytes) {
           } else {
             newBytes = new TextEncoder().encode(editorTextarea.value);
           }
-          const newValue = {
+          var newValue = {
             contents: newBytes,
             mode: currentValue.mode || 33206,
             timestamp: new Date()
           };
-          putEntry(currentKey, newValue).then(function() {
+          // auto-backup
+          var bakKey = currentKey + '.bak';
+          var bakValue = { contents: currentValue.contents, mode: currentValue.mode, timestamp: new Date() };
+          putEntry(bakKey, bakValue).then(function() {
+            return putEntry(currentKey, newValue);
+          }).then(function() {
             editorSave.textContent = 'Saved!';
             setTimeout(function() { editorSave.textContent = 'Save Changes'; }, 1500);
             currentValue = newValue;
+            isDirty = false;
+            currentOriginalText = editorTextarea.value;
           }).catch(function(err) {
             alert('Error saving: ' + (err && err.message ? err.message : err));
           });
@@ -591,6 +752,7 @@ function toHex(bytes) {
 
       editorDelete.addEventListener('click', function() {
         if (!currentKey) return;
+        if (!checkUnsaved()) return;
         if (!confirm('Delete "' + currentKey + '"?\nThis cannot be undone.')) return;
         deleteEntry(currentKey).then(refreshList).catch(function(err) {
           alert('Error deleting: ' + (err && err.message ? err.message : err));
@@ -711,18 +873,23 @@ function toHex(bytes) {
 
       function openModal() {
         savesModal.hidden = false;
+        savesSearch.value = '';
         if (window.__launcher && window.__launcher.isGameStarted()) {
           savesWarning.hidden = false;
         } else {
           savesWarning.hidden = true;
         }
         refreshList();
+        if (saveTimer) clearInterval(saveTimer);
+        saveTimer = setInterval(refreshList, 5000);
       }
       function closeModal() {
+        if (!checkUnsaved()) return;
         savesModal.hidden = true;
         savesWarning.hidden = true;
         currentKey = null;
         currentValue = null;
+        if (saveTimer) clearInterval(saveTimer);
       }
 
       // ── Firebase config ──────────────────────────────────────────────
@@ -823,16 +990,17 @@ function toHex(bytes) {
         if (!path) { alert('Enter a Cloud ID first.'); return; }
         if (!confirm('Upload all save files to the cloud? This will overwrite the cloud backup.')) return;
         uploadBtn.disabled = true;
-        uploadBtn.textContent = 'Uploading...';
+        uploadBtn.innerHTML = '&#8987; Uploading...';
         getAllSavesAsObject().then(function(data) {
           data.uploadedAt = new Date().toISOString();
           return rtdb.ref(path).set(data);
         }).then(function() {
-          uploadBtn.textContent = '\u2601 Upload';
+          uploadBtn.innerHTML = '\u2601 Upload';
           uploadBtn.disabled = false;
-          alert('Saves uploaded successfully.');
+          if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Saves uploaded to cloud.');
+          else alert('Saves uploaded successfully.');
         }).catch(function(err) {
-          uploadBtn.textContent = '\u2601 Upload';
+          uploadBtn.innerHTML = '\u2601 Upload';
           uploadBtn.disabled = false;
           alert('Upload failed: ' + (err && err.message ? err.message : err));
         });
@@ -844,7 +1012,7 @@ function toHex(bytes) {
         if (!path) { alert('Enter a Cloud ID first.'); return; }
         if (!confirm('Download cloud saves? This will OVERWRITE all local saves with the cloud version.')) return;
         downloadBtn.disabled = true;
-        downloadBtn.textContent = 'Downloading...';
+        downloadBtn.innerHTML = '&#8987; Downloading...';
         rtdb.ref(path).once('value').then(function(snapshot) {
           var data = snapshot.val();
           if (!data) {
@@ -852,13 +1020,16 @@ function toHex(bytes) {
             return;
           }
           return importSavesFromObject(data).then(function(count) {
-            alert('Downloaded ' + count + ' file(s) from cloud.');
+            downloadBtn.innerHTML = '\u2601 Download';
+            downloadBtn.disabled = false;
+            if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Downloaded ' + count + ' file(s).');
+            else alert('Downloaded ' + count + ' file(s) from cloud.');
             refreshList();
           });
         }).catch(function(err) {
           alert('Download failed: ' + (err && err.message ? err.message : err));
         }).finally(function() {
-          downloadBtn.textContent = '\u2601 Download';
+          downloadBtn.innerHTML = '\u2601 Download';
           downloadBtn.disabled = false;
         });
       });
@@ -874,6 +1045,36 @@ function toHex(bytes) {
           closeModal();
         }
       }, true); // capture phase so it runs before launcher's keydown
+
+      // Modal focus trap
+      savesModal.addEventListener('keydown', function(e) {
+        if (e.key !== 'Tab') return;
+        var focusable = savesModal.querySelectorAll('button, input, textarea, select, [tabindex]:not([tabindex="-1"])');
+        if (focusable.length === 0) return;
+        var first = focusable[0], last = focusable[focusable.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+        } else {
+          if (document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+      });
+
+      // Global keyboard shortcuts
+      document.addEventListener('keydown', function(e) {
+        if (!savesModal.hidden && (e.ctrlKey || e.metaKey)) {
+          if (e.key === 's') {
+            e.preventDefault();
+            if (!saveEditor.hidden && !editorSave.disabled) editorSave.click();
+          } else if (e.key === 'e') {
+            e.preventDefault();
+            if (currentKey && currentValue) saveSingleFile(currentKey, currentValue);
+          } else if (e.key === 'f') {
+            e.preventDefault();
+            savesSearch.focus();
+            savesSearch.select();
+          }
+        }
+      });
     })();
   </script>
 </body>
