@@ -241,7 +241,7 @@
           if (event.key === '[') { setSpeed(getSpeed() - 0.25); event.preventDefault(); return; }
           if (event.key === ']') { setSpeed(getSpeed() + 0.25); event.preventDefault(); return; }
           if (event.key === '\\') { setSpeed(1); event.preventDefault(); return; }
-          iframe.contentWindow.postMessage({ type: 'keydown', key: event.key }, origin);
+          try { iframe.contentWindow.postMessage({ type: 'keydown', key: event.key }, origin); } catch(e) {}
           return;
         }
 
@@ -281,7 +281,7 @@
 
       document.addEventListener('keyup', function(e) {
         if (gamestarted) {
-          iframe.contentWindow.postMessage({ type: 'keyup', key: e.key }, origin);
+          try { iframe.contentWindow.postMessage({ type: 'keyup', key: e.key }, origin); } catch(e) {}
         }
       });
     })();
@@ -602,27 +602,18 @@
         tennaWindow = window.open('/tenna/', 'tenna-editor', 'width=1400,height=900');
         if (!tennaWindow) { alert('Pop-up blocked. Allow pop-ups for this site.'); return; }
 
-        var poll = setInterval(function() {
-          if (tennaWindow.closed) { clearInterval(poll); return; }
-          try { tennaWindow.postMessage({ type: 'tenna-open', saveData: { bytes: value.contents, filename: key } }, '*'); }
-          catch(e) { clearInterval(poll); return; }
-          clearInterval(poll);
-        }, 200);
-
-        // Set a timeout for the ready message
         var timeout = setTimeout(function() {
-          clearInterval(poll);
           alert('Tenna Editor took too long to load. Try again.');
         }, 15000);
 
-        window.addEventListener('message', function tennaReady(e) {
-          if (e.data && e.data.type === 'tenna-ready') {
+        function handler(e) {
+          if (e.data && e.data.type === 'tenna-ready' && e.source === tennaWindow) {
             clearTimeout(timeout);
-            clearInterval(poll);
+            window.removeEventListener('message', handler);
             tennaWindow.postMessage({ type: 'tenna-open', saveData: { bytes: value.contents, filename: key } }, '*');
-            window.removeEventListener('message', tennaReady);
           }
-        });
+        }
+        window.addEventListener('message', handler);
       }
 
       // Listen for exported saves from Tenna Editor
@@ -701,12 +692,36 @@
         }
       }
 
+      // Encode/decode file keys for RTDB (forbidden: . # $ / [ ])
+      function encodeKey(key) {
+        if (/[\.\#\$\/\[\]]/.test(key)) {
+          var hex = '';
+          for (var i = 0; i < key.length; i++) {
+            var c = key.charCodeAt(i).toString(16);
+            hex += ('00' + c).slice(-2);
+          }
+          return '~' + hex;
+        }
+        return key;
+      }
+      function decodeKey(key) {
+        if (key.charAt(0) === '~') {
+          var hex = key.slice(1);
+          var str = '';
+          for (var i = 0; i < hex.length; i += 2) {
+            str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+          }
+          return str;
+        }
+        return key;
+      }
+
       function getAllSavesAsObject() {
         return listAll().then(function(items) {
           var out = { version: 2, exportedAt: new Date().toISOString(), files: {} };
           items.forEach(function(item) {
             var v = item.value || {};
-            out.files[item.key] = {
+            out.files[encodeKey(item.key)] = {
               mode: v.mode,
               timestamp: v.timestamp instanceof Date ? v.timestamp.toISOString() : v.timestamp,
               contents: v.contents instanceof Uint8Array ? toBase64(v.contents) : null
@@ -728,7 +743,7 @@
             timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
             contents: v.contents ? fromBase64(v.contents) : new Uint8Array(0)
           };
-          return putEntry(key, value);
+          return putEntry(decodeKey(key), value);
         });
         return Promise.all(promises).then(function() {
           return entries.length;
