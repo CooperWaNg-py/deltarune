@@ -111,12 +111,12 @@
             <span id="editorFilename" class="editor-filename"></span>
           </div>
           <textarea id="editorTextarea" spellcheck="false" autocomplete="off"></textarea>
+          <div id="hexPreview" class="hex-preview" hidden></div>
           <div class="editor-actions">
             <button id="editorSave" class="btn-primary">Save Changes</button>
             <button id="editorDelete" class="btn-danger">Delete File</button>
           </div>
         </div>
-        <div id="hexPreview" class="hex-preview" hidden></div>
       </div>
       <div class="modal-footer" id="savesModalFooter">
         <button id="tennaBtn">Tenna Editor</button>
@@ -147,7 +147,7 @@
       const speedSlider = document.getElementById('speedSlider');
       const speedValue = document.getElementById('speedValue');
       const versionTag = document.getElementById('versionTag');
-      versionTag.textContent = 'v0.2.0 (' + document.lastModified.split(' ')[0] + ')';
+      versionTag.textContent = 'v0.2.0 (' + new Date(document.lastModified).toISOString().split('T')[0] + ')';
 
       function getSpeed() { return parseFloat(localStorage.getItem(SPEED_KEY)) || 1; }
       function setSpeed(v) {
@@ -193,11 +193,10 @@
 
       var fullscreenBtn = document.getElementById('fullscreenBtn');
       fullscreenBtn.addEventListener('click', function() {
-        var el = document.documentElement;
         if (document.fullscreenElement) {
           document.exitFullscreen().catch(function(){});
-        } else {
-          el.requestFullscreen().catch(function(){});
+        } else if (iframe.requestFullscreen) {
+          iframe.requestFullscreen().catch(function(){});
         }
       });
 
@@ -242,13 +241,16 @@
 
         iframe.onload = function() {
           iframe.contentWindow.focus();
+          setVolume(getVolume());
         };
       };
 
       function backToMenu() {
         if (!gamestarted) return;
         iframe.classList.remove('active');
-        iframe.src = 'about:blank';
+        setTimeout(function() {
+          iframe.src = 'about:blank';
+        }, 500);
         gamestarted = false;
         selectedChapter = null;
         rows().forEach(function(r) { r.classList.remove('selected'); });
@@ -540,6 +542,7 @@
 
       function refreshList() {
         saveEditor.hidden = true;
+        hexPreview.hidden = true;
         savesList.hidden = false;
         savesList.innerHTML = '<div class="saves-empty">Loading...</div>';
         listAll().then(function(items) {
@@ -637,7 +640,8 @@
 
       function fromHex(hex) {
         hex = hex.replace(/[^0-9a-fA-F]/g, '');
-        var bytes = new Uint8Array(Math.ceil(hex.length / 2));
+        if (hex.length % 2) hex = '0' + hex;
+        var bytes = new Uint8Array(hex.length / 2);
         for (var i = 0; i < bytes.length; i++) {
           bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
         }
@@ -728,10 +732,15 @@
             mode: currentValue.mode || 33206,
             timestamp: new Date()
           };
-          // auto-backup
-          var bakKey = currentKey + '.bak';
-          var bakValue = { contents: currentValue.contents, mode: currentValue.mode, timestamp: new Date() };
-          putEntry(bakKey, bakValue).then(function() {
+          // auto-backup only when content actually changed
+          var doBackup = isDirty;
+          var bakPromise = Promise.resolve();
+          if (doBackup) {
+            var bakKey = currentKey + '.bak';
+            var bakValue = { contents: currentValue.contents, mode: currentValue.mode, timestamp: new Date() };
+            bakPromise = putEntry(bakKey, bakValue);
+          }
+          bakPromise.then(function() {
             return putEntry(currentKey, newValue);
           }).then(function() {
             editorSave.textContent = 'Saved!';
@@ -978,10 +987,12 @@
           var out = { version: 2, exportedAt: new Date().toISOString(), files: {} };
           items.forEach(function(item) {
             var v = item.value || {};
+            var contents = v.contents;
+            if (contents instanceof ArrayBuffer) contents = new Uint8Array(contents);
             out.files[encodeKey(item.key)] = {
               mode: v.mode,
               timestamp: v.timestamp instanceof Date ? v.timestamp.toISOString() : v.timestamp,
-              contents: v.contents instanceof Uint8Array ? toBase64(v.contents) : null
+              contents: contents instanceof Uint8Array ? toBase64(contents) : null
             };
           });
           return out;
@@ -1019,17 +1030,17 @@
         if (!path) { alert('Enter a Cloud ID first.'); return; }
         if (!confirm('Upload all save files to the cloud? This will overwrite the cloud backup.')) return;
         uploadBtn.disabled = true;
-        uploadBtn.innerHTML = '&#8987; Uploading...';
+        uploadBtn.textContent = '\u231b Uploading...';
         getAllSavesAsObject().then(function(data) {
           data.uploadedAt = new Date().toISOString();
           return rtdb.ref(path).set(data);
         }).then(function() {
-          uploadBtn.innerHTML = '\u2601 Upload';
+          uploadBtn.textContent = '\u2601 Upload';
           uploadBtn.disabled = false;
           if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Saves uploaded to cloud.');
           else alert('Saves uploaded successfully.');
         }).catch(function(err) {
-          uploadBtn.innerHTML = '\u2601 Upload';
+          uploadBtn.textContent = '\u2601 Upload';
           uploadBtn.disabled = false;
           alert('Upload failed: ' + (err && err.message ? err.message : err));
         });
@@ -1041,7 +1052,7 @@
         if (!path) { alert('Enter a Cloud ID first.'); return; }
         if (!confirm('Download cloud saves? Only local files that also exist in the cloud will be updated.')) return;
         downloadBtn.disabled = true;
-        downloadBtn.innerHTML = '&#8987; Downloading...';
+        downloadBtn.textContent = '\u231b Downloading...';
         rtdb.ref(path).once('value').then(function(snapshot) {
           var data = snapshot.val();
           if (!data) {
@@ -1049,7 +1060,7 @@
             return;
           }
           return importSavesFromObject(data).then(function(result) {
-            downloadBtn.innerHTML = '\u2601 Download';
+            downloadBtn.textContent = '\u2601 Download';
             downloadBtn.disabled = false;
             var msg = 'Updated ' + result.updated + ' file(s) from cloud.';
             if (result.updated < result.total) msg += ' (' + (result.total - result.updated) + ' cloud-only files skipped)';
@@ -1060,7 +1071,7 @@
         }).catch(function(err) {
           alert('Download failed: ' + (err && err.message ? err.message : err));
         }).finally(function() {
-          downloadBtn.innerHTML = '\u2601 Download';
+          downloadBtn.textContent = '\u2601 Download';
           downloadBtn.disabled = false;
         });
       });

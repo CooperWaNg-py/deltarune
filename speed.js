@@ -28,15 +28,4 @@
       return perfBase + (real - perfBase) * s;
     };
   }
-
-  // wrap Date.now too
-  var origDate = Date.now;
-  var dateBase = null;
-  Date.now = function() {
-    var real = origDate();
-    if (dateBase === null) dateBase = real;
-    var s = parseFloat(localStorage.getItem(KEY));
-    if (!isFinite(s) || s <= 0) s = 1;
-    return dateBase + (real - dateBase) * s;
-  };
 })();
