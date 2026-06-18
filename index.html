@@ -483,13 +483,14 @@
         });
       }
 
-      function toHex(bytes) {
-        var hex = '';
-        for (var i = 0; i < bytes.length; i++) {
-          hex += ('00' + bytes[i].toString(16)).slice(-2);
-        }
-        return hex;
-      }
+function toHex(bytes) {
+    if (!bytes || typeof bytes.length !== 'number') return '[No data]';
+    var hex = '';
+    for (var i = 0; i < bytes.length; i++) {
+      hex += ('00' + (bytes[i] || 0).toString(16)).slice(-2);
+    }
+    return hex || '[Empty]';
+  }
 
       function fromHex(hex) {
         hex = hex.replace(/\s+/g, '');
@@ -504,17 +505,23 @@
         currentKey = key;
         currentValue = value;
         editorFilename.textContent = key;
-        const text = tryDecodeText(value.contents);
-        if (text === null) {
-          isHexMode = true;
-          editorTextarea.value = toHex(value.contents);
+        try {
+          var bytes = value && value.contents;
+          const text = tryDecodeText(bytes);
+          if (text === null) {
+            isHexMode = true;
+            editorTextarea.value = toHex(bytes);
+          } else {
+            isHexMode = false;
+            editorTextarea.value = text;
+          }
           editorTextarea.readOnly = false;
           editorSave.disabled = false;
-        } else {
+        } catch (e) {
           isHexMode = false;
-          editorTextarea.value = text;
-          editorTextarea.readOnly = false;
-          editorSave.disabled = false;
+          editorTextarea.value = '[Error opening file: ' + (e && e.message ? e.message : e) + ']';
+          editorTextarea.readOnly = true;
+          editorSave.disabled = true;
         }
         savesList.hidden = true;
         saveEditor.hidden = false;
@@ -623,7 +630,7 @@
       function openTennaEditor(key, value) {
         if (!value || !value.contents) { alert('Select a save file first.'); return; }
         if (tennaWindow && !tennaWindow.closed) { tennaWindow.close(); }
-        tennaWindow = window.open('/tenna/', 'tenna-editor', 'width=1400,height=900');
+        tennaWindow = window.open('tenna/', 'tenna-editor', 'width=1400,height=900');
         if (!tennaWindow) { alert('Pop-up blocked. Allow pop-ups for this site.'); return; }
 
         var timeout = setTimeout(function() {
