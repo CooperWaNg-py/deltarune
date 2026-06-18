@@ -312,6 +312,7 @@
 
       let currentKey = null;
       let currentValue = null;
+      let isHexMode = false;
 
       function openDB() {
         return new Promise(function(resolve, reject) {
@@ -482,17 +483,35 @@
         });
       }
 
+      function toHex(bytes) {
+        var hex = '';
+        for (var i = 0; i < bytes.length; i++) {
+          hex += ('00' + bytes[i].toString(16)).slice(-2);
+        }
+        return hex;
+      }
+
+      function fromHex(hex) {
+        hex = hex.replace(/\s+/g, '');
+        var bytes = new Uint8Array(Math.ceil(hex.length / 2));
+        for (var i = 0; i < bytes.length; i++) {
+          bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+        }
+        return bytes;
+      }
+
       function openEditor(key, value) {
         currentKey = key;
         currentValue = value;
         editorFilename.textContent = key;
         const text = tryDecodeText(value.contents);
         if (text === null) {
-          const size = value.contents ? value.contents.length : 0;
-          editorTextarea.value = '[Binary file, ' + formatSize(size) + ' \u2014 cannot edit as text. Use Export All to back it up.]';
-          editorTextarea.readOnly = true;
-          editorSave.disabled = true;
+          isHexMode = true;
+          editorTextarea.value = toHex(value.contents);
+          editorTextarea.readOnly = false;
+          editorSave.disabled = false;
         } else {
+          isHexMode = false;
           editorTextarea.value = text;
           editorTextarea.readOnly = false;
           editorSave.disabled = false;
@@ -507,7 +526,12 @@
       editorSave.addEventListener('click', function() {
         if (!currentKey || !currentValue) return;
         try {
-          const newBytes = new TextEncoder().encode(editorTextarea.value);
+          var newBytes;
+          if (isHexMode) {
+            newBytes = fromHex(editorTextarea.value);
+          } else {
+            newBytes = new TextEncoder().encode(editorTextarea.value);
+          }
           const newValue = {
             contents: newBytes,
             mode: currentValue.mode || 33206,
