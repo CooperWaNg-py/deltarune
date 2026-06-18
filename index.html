@@ -403,13 +403,16 @@
         if (!(bytes instanceof Uint8Array)) return null;
         if (bytes.length === 0) return '';
         try {
-          const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-          let controlChars = 0;
-          for (let i = 0; i < text.length; i++) {
-            const code = text.charCodeAt(i);
-            if (code < 32 && code !== 9 && code !== 10 && code !== 13) controlChars++;
+          const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+          if (text.length === 0) return null;
+          var bad = 0;
+          for (var i = 0; i < text.length; i++) {
+            var code = text.charCodeAt(i);
+            if (code === 0xFFFD) bad++;
+            else if (code < 8) bad++;
+            else if (code > 13 && code < 32) bad++;
           }
-          if (text.length > 0 && controlChars / text.length > 0.02) return null;
+          if (bad / text.length > 0.05) return null;
           return text;
         } catch (e) {
           return null;
