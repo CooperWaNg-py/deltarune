@@ -390,7 +390,9 @@
       }
 
       function tryDecodeText(bytes) {
-        if (!bytes || !(bytes instanceof Uint8Array)) return null;
+        if (!bytes) return null;
+        if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
+        if (!(bytes instanceof Uint8Array)) return null;
         if (bytes.length === 0) return '';
         try {
           const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
@@ -455,8 +457,10 @@
           files.sort(function(a, b) { return a.key.localeCompare(b.key); });
           savesList.innerHTML = '';
           files.forEach(function(item) {
-            const size = item.value.contents ? item.value.contents.length : 0;
-            const isText = tryDecodeText(item.value.contents) !== null;
+            var data = item.value && item.value.contents;
+            if (data instanceof ArrayBuffer) data = new Uint8Array(data);
+            var size = data ? data.length : 0;
+            const isText = tryDecodeText(data) !== null;
             const div = document.createElement('div');
             div.className = 'save-item';
             div.tabIndex = 0;
@@ -490,7 +494,9 @@
       }
 
 function toHex(bytes) {
-    if (!bytes || typeof bytes.length !== 'number') return '[No data]';
+    if (!bytes) return '[No data]';
+    if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
+    if (typeof bytes.length !== 'number') return '[No data]';
     var hex = '';
     for (var i = 0; i < bytes.length; i++) {
       hex += ('00' + (bytes[i] || 0).toString(16)).slice(-2);
