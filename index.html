@@ -912,6 +912,7 @@
       };
 
       var rtdb = null;
+      var firebaseLoading = false;
       var cloudIdInput = document.getElementById('cloudId');
       var uploadBtn = document.getElementById('uploadBtn');
       var downloadBtn = document.getElementById('downloadBtn');
@@ -919,27 +920,52 @@
       function getCloudPath() {
         var id = cloudIdInput.value.trim();
         if (!id) return null;
-        return 'saves/' + id.replace(/[\.\#\$\/\[\]]/g, '_');
+        return 'saves/' + id.replace(/[\.\#\$\/\[\]~]/g, '_');
       }
 
       function initFirebase() {
-        if (firebaseConfig.apiKey === 'YOUR_API_KEY') return;
-        if (rtdb) return;
-        if (typeof firebase === 'undefined') {
-          uploadBtn.disabled = true;
-          downloadBtn.disabled = true;
-          loadFirebaseSDK().then(function() { return initFirebase(); }).catch(function(e) {
-            console.warn('Firebase load failed:', e);
-            uploadBtn.disabled = false;
-            downloadBtn.disabled = false;
-          });
-          return;
-        }
-        try {
-          rtdb = firebase.initializeApp(firebaseConfig).database();
-        } catch (e) {
-          console.warn('Firebase init failed:', e);
-        }
+        return new Promise(function(resolve, reject) {
+          if (firebaseConfig.apiKey === 'YOUR_API_KEY') {
+            reject(new Error('Firebase not configured.'));
+            return;
+          }
+          if (rtdb) { resolve(rtdb); return; }
+          if (typeof firebase === 'undefined') {
+            if (firebaseLoading) {
+              // Already loading — wait a bit and retry
+              setTimeout(function() { initFirebase().then(resolve).catch(reject); }, 500);
+              return;
+            }
+            firebaseLoading = true;
+            uploadBtn.disabled = true;
+            downloadBtn.disabled = true;
+            loadFirebaseSDK().then(function() {
+              initFirebase().then(resolve).catch(reject);
+            }).catch(function(e) {
+              firebaseLoading = false;
+              uploadBtn.disabled = false;
+              downloadBtn.disabled = false;
+              reject(e);
+            });
+            return;
+          }
+          try {
+            rtdb = firebase.initializeApp(firebaseConfig).database();
+            firebaseLoading = false;
+            resolve(rtdb);
+          } catch (e) {
+            firebaseLoading = false;
+            // If app already exists, reuse it
+            if (e.code === 'app/already-initialized' || e.code === 'app/duplicate-app' || e.message && e.message.indexOf('already exists') !== -1) {
+              try {
+                rtdb = firebase.app().database();
+                if (rtdb) { resolve(rtdb); return; }
+              } catch (e2) {}
+            }
+            console.warn('Firebase init failed:', e);
+            reject(e);
+          }
+        });
       }
 
       function loadFirebaseSDK() {
@@ -960,7 +986,7 @@
 
       // Encode/decode file keys for RTDB (forbidden: . # $ / [ ])
       function encodeKey(key) {
-        if (/[\.\#\$\/\[\]]/.test(key)) {
+        if (/[\.\#\$\/\[\]~]/.test(key)) {
           var hex = '';
           for (var i = 0; i < key.length; i++) {
             var c = key.charCodeAt(i).toString(16);
@@ -973,6 +999,7 @@
       function decodeKey(key) {
         if (key.charAt(0) === '~') {
           var hex = key.slice(1);
+          if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) return key;
           var str = '';
           for (var i = 0; i < hex.length; i += 2) {
             str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
@@ -1005,7 +1032,9 @@
         }
         return listAll().then(function(localItems) {
           var localKeys = {};
-          localItems.forEach(function(item) { localKeys[item.key] = true; });
+          localItems.forEach(function(item) {
+            if (!isDirectory(item.value)) localKeys[item.key] = true;
+          });
           var entries = Object.keys(data.files).filter(function(key) {
             return localKeys[decodeKey(key)];
           });
@@ -1025,13 +1054,15 @@
       }
 
       uploadBtn.addEventListener('click', function() {
-        initFirebase();
         var path = getCloudPath();
         if (!path) { alert('Enter a Cloud ID first.'); return; }
         if (!confirm('Upload all save files to the cloud? This will overwrite the cloud backup.')) return;
         uploadBtn.disabled = true;
         uploadBtn.textContent = '\u231b Uploading...';
-        getAllSavesAsObject().then(function(data) {
+        initFirebase().then(function() {
+          return getAllSavesAsObject();
+        }).then(function(data) {
+          if (!rtdb) { throw new Error('Firebase not initialized.'); }
           data.uploadedAt = new Date().toISOString();
           return rtdb.ref(path).set(data);
         }).then(function() {
@@ -1047,13 +1078,15 @@
       });
 
       downloadBtn.addEventListener('click', function() {
-        initFirebase();
         var path = getCloudPath();
         if (!path) { alert('Enter a Cloud ID first.'); return; }
         if (!confirm('Download cloud saves? Only local files that also exist in the cloud will be updated.')) return;
         downloadBtn.disabled = true;
         downloadBtn.textContent = '\u231b Downloading...';
-        rtdb.ref(path).once('value').then(function(snapshot) {
+        initFirebase().then(function() {
+          if (!rtdb) { throw new Error('Firebase not initialized.'); }
+          return rtdb.ref(path).once('value');
+        }).then(function(snapshot) {
           var data = snapshot.val();
           if (!data) {
             alert('No cloud saves found for this ID.');
