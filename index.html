@@ -55,8 +55,9 @@
 
   <div id="versionTag"></div>
 
-  <audio id="drone" loop autoplay hidden>
+  <audio id="drone" loop hidden>
     <source src="audios/AUDIO_DRONE.ogg" type="audio/ogg">
+    <source src="audios/AUDIO_DRONE.mp3" type="audio/mpeg">
   </audio>
   <button id="settingsBtn" aria-label="Settings" title="Settings">&#9881;</button>
   <button id="savesBtn" aria-label="Manage save files" title="Manage save files">&#128190;</button>
@@ -147,7 +148,7 @@
       const speedSlider = document.getElementById('speedSlider');
       const speedValue = document.getElementById('speedValue');
       const versionTag = document.getElementById('versionTag');
-      versionTag.textContent = 'v0.2.0 (' + new Date(document.lastModified).toISOString().split('T')[0] + ')';
+      versionTag.textContent = 'v0.2.1 (' + new Date(document.lastModified).toISOString().split('T')[0] + ')';
 
       function getSpeed() { return parseFloat(localStorage.getItem(SPEED_KEY)) || 1; }
       function setSpeed(v) {
@@ -205,6 +206,18 @@
       }
       updateMuteButton();
 
+      // Start menu drone on first user interaction (replaces removed autoplay)
+      var droneStarted = false;
+      function startDrone() {
+        if (droneStarted) return;
+        droneStarted = true;
+        audio.play().catch(function(){});
+        document.removeEventListener('click', startDrone);
+        document.removeEventListener('keydown', startDrone);
+      }
+      document.addEventListener('click', startDrone);
+      document.addEventListener('keydown', startDrone);
+
       mute.addEventListener('click', () => {
         if (!gamestarted) {
           audio.muted = !audio.muted;
@@ -226,7 +239,7 @@
 
       window.loadChapter = function(chapter) {
         if (gamestarted) return;
-        menuselectaudio.play();
+        menuselectaudio.play().catch(function(){});
         gamestarted = true;
 
         menu.classList.add('hidden-menu');
@@ -276,7 +289,7 @@
       rows().forEach(function(row) {
         row.addEventListener('mouseenter', function() {
           if (!gamestarted) {
-            menumoveaudio.play();
+            menumoveaudio.play().catch(function(){});
             if (selectedChapter !== null && rows()[selectedChapter]) {
               rows()[selectedChapter].classList.remove('selected');
             }
@@ -319,7 +332,7 @@
             rows()[selectedChapter].classList.add('selected');
             rows()[selectedChapter].focus();
           }
-          menumoveaudio.play();
+          menumoveaudio.play().catch(function(){});
         } else if (event.key === 'ArrowDown') {
           event.preventDefault();
           if (selectedChapter === null) {
@@ -332,7 +345,7 @@
             rows()[selectedChapter].classList.add('selected');
             rows()[selectedChapter].focus();
           }
-          menumoveaudio.play();
+          menumoveaudio.play().catch(function(){});
         } else if (event.key === 'Enter') {
           if (selectedChapter !== null && rows()[selectedChapter]) {
             rows()[selectedChapter].click();
@@ -438,6 +451,7 @@
       }
 
       function putEntry(key, value) {
+        cachedItems = null;
         return openDB().then(function(db) {
           return new Promise(function(resolve, reject) {
             const tx = db.transaction(STORE, 'readwrite');
@@ -449,6 +463,7 @@
       }
 
       function deleteEntry(key) {
+        cachedItems = null;
         return openDB().then(function(db) {
           return new Promise(function(resolve, reject) {
             const tx = db.transaction(STORE, 'readwrite');
@@ -528,7 +543,7 @@
 
       function saveSingleFile(key, value) {
         if (!value || !value.contents) { alert('Empty file.'); return; }
-        var name = key.replace(/[\\\/]/g, '_').replace(/^_+/, '') || 'save';
+        var name = key.replace(/[\\\/:*?"<>|]/g, '_').replace(/^_+/, '') || 'save';
         var blob = new Blob([value.contents], { type: 'application/octet-stream' });
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
@@ -541,11 +556,12 @@
       }
 
       function refreshList() {
+        if (!saveEditor.hidden) return;
         saveEditor.hidden = true;
         hexPreview.hidden = true;
         savesList.hidden = false;
         savesList.innerHTML = '<div class="saves-empty">Loading...</div>';
-        listAll().then(function(items) {
+        getCachedItems().then(function(items) {
           var filter = savesSearch.value.toLowerCase().trim();
           const files = items.filter(function(it) { return !isDirectory(it.value); });
           if (files.length === 0) {
@@ -594,6 +610,12 @@
               tagSpan.textContent = tag;
               nameSpan.appendChild(tagSpan);
             }
+            if (item.key.endsWith('.bak')) {
+              var bakTag = document.createElement('span');
+              bakTag.className = 'save-chapter-tag';
+              bakTag.textContent = 'backup';
+              nameSpan.appendChild(bakTag);
+            }
             const row2 = document.createElement('div');
             row2.className = 'save-meta';
             const metaSpan = document.createElement('span');
@@ -626,7 +648,18 @@
         });
       }
 
-      savesSearch.addEventListener('input', refreshList);
+      var cachedItems = null;
+      function getCachedItems() {
+        if (cachedItems) return Promise.resolve(cachedItems);
+        return listAll().then(function(items) { cachedItems = items; return items; });
+      }
+      function invalidateCache() { cachedItems = null; }
+
+      var searchTimer = null;
+      savesSearch.addEventListener('input', function() {
+        if (searchTimer) clearTimeout(searchTimer);
+        searchTimer = setTimeout(refreshList, 200);
+      });
 
       function getChapterTag(key) {
         var m = key.match(/filech(\d)/);
@@ -640,7 +673,7 @@
 
       function fromHex(hex) {
         hex = hex.replace(/[^0-9a-fA-F]/g, '');
-        if (hex.length % 2) hex = '0' + hex;
+        if (hex.length % 2) throw new Error('Hex string has an odd number of digits (' + hex.length + ').');
         var bytes = new Uint8Array(hex.length / 2);
         for (var i = 0; i < bytes.length; i++) {
           bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
@@ -768,13 +801,15 @@
       exportBtn.addEventListener('click', function() {
         listAll().then(function(items) {
           if (items.length === 0) { alert('Nothing to export.'); return; }
-          const out = { version: 1, db: DB_NAME, exportedAt: new Date().toISOString(), files: {} };
+          const out = { version: 2, db: DB_NAME, exportedAt: new Date().toISOString(), files: {} };
           items.forEach(function(item) {
             const v = item.value || {};
+            var contents = v.contents;
+            if (contents instanceof ArrayBuffer) contents = new Uint8Array(contents);
             out.files[item.key] = {
               mode: v.mode,
               timestamp: v.timestamp instanceof Date ? v.timestamp.toISOString() : v.timestamp,
-              contents: v.contents instanceof Uint8Array ? toBase64(v.contents) : null
+              contents: contents instanceof Uint8Array ? toBase64(contents) : null
             };
           });
           const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
@@ -805,15 +840,17 @@
           if (!data || !data.files || typeof data.files !== 'object') {
             throw new Error('Invalid save file format.');
           }
+          const isEncoded = data.version === 2;
           const entries = Object.keys(data.files);
           const promises = entries.map(function(key) {
+            var decodedKey = isEncoded ? decodeKey(key) : key;
             const v = data.files[key];
             const value = {
               mode: typeof v.mode === 'number' ? v.mode : 33206,
               timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
               contents: v.contents ? fromBase64(v.contents) : new Uint8Array(0)
             };
-            return putEntry(key, value);
+            return putEntry(decodedKey, value);
           });
           return Promise.all(promises).then(function() {
             alert('Imported ' + entries.length + ' file(s).');
@@ -845,7 +882,7 @@
           if (e.data && e.data.type === 'tenna-ready' && e.source === tennaWindow) {
             clearTimeout(timeout);
             window.removeEventListener('message', handler);
-            tennaWindow.postMessage({ type: 'tenna-open', saveData: { bytes: bytes, filename: key } }, '*');
+            tennaWindow.postMessage({ type: 'tenna-open', saveData: { bytes: bytes, filename: key } }, window.location.origin);
           }
         }
         window.addEventListener('message', handler);
@@ -853,7 +890,7 @@
 
       // Listen for exported saves from Tenna Editor
       window.addEventListener('message', function(e) {
-        if (e.data && e.data.type === 'tenna-exported' && e.data.bytes) {
+        if (e.data && e.data.type === 'tenna-exported' && e.data.bytes && e.source === tennaWindow && e.origin === window.location.origin) {
           var key = e.data.filename || 'imported.sav';
           var val = {
             contents: e.data.bytes,
@@ -890,6 +927,7 @@
         saveTimer = setInterval(refreshList, 5000);
       }
       function closeModal() {
+        if (cloudBusy) return;
         if (!checkUnsaved()) return;
         savesModal.hidden = true;
         savesWarning.hidden = true;
@@ -913,6 +951,7 @@
 
       var rtdb = null;
       var firebaseLoading = false;
+      var cloudBusy = false;
       var cloudIdInput = document.getElementById('cloudId');
       var uploadBtn = document.getElementById('uploadBtn');
       var downloadBtn = document.getElementById('downloadBtn');
@@ -1059,10 +1098,26 @@
         if (!confirm('Upload all save files to the cloud? This will overwrite the cloud backup.')) return;
         uploadBtn.disabled = true;
         uploadBtn.textContent = '\u231b Uploading...';
+        cloudBusy = true;
         initFirebase().then(function() {
           return getAllSavesAsObject();
         }).then(function(data) {
           if (!rtdb) { throw new Error('Firebase not initialized.'); }
+          // Estimate payload size: base64 is ~4/3 of original, plus JSON overhead
+          var estBytes = 0;
+          for (var k in data.files) {
+            var v = data.files[k];
+            if (v.contents) estBytes += v.contents.length;
+          }
+          var estPayload = Math.round(estBytes * 4 / 3 + 1024);
+          if (estPayload > 10 * 1024 * 1024) {
+            if (!confirm('Upload size is estimated at ' + (estPayload / 1024 / 1024).toFixed(1) + ' MB. Continue?')) {
+              uploadBtn.textContent = '\u2601 Upload';
+              uploadBtn.disabled = false;
+              cloudBusy = false;
+              return;
+            }
+          }
           data.uploadedAt = new Date().toISOString();
           return rtdb.ref(path).set(data);
         }).then(function() {
@@ -1074,6 +1129,8 @@
           uploadBtn.textContent = '\u2601 Upload';
           uploadBtn.disabled = false;
           alert('Upload failed: ' + (err && err.message ? err.message : err));
+        }).finally(function() {
+          cloudBusy = false;
         });
       });
 
@@ -1083,6 +1140,7 @@
         if (!confirm('Download cloud saves? Only local files that also exist in the cloud will be updated.')) return;
         downloadBtn.disabled = true;
         downloadBtn.textContent = '\u231b Downloading...';
+        cloudBusy = true;
         initFirebase().then(function() {
           if (!rtdb) { throw new Error('Firebase not initialized.'); }
           return rtdb.ref(path).once('value');
@@ -1106,6 +1164,7 @@
         }).finally(function() {
           downloadBtn.textContent = '\u2601 Download';
           downloadBtn.disabled = false;
+          cloudBusy = false;
         });
       });
 
