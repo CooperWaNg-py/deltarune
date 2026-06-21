@@ -498,6 +498,12 @@ img {
 
 .btn-danger:hover { background: #6a3a3a !important; }
 
+.btn-restore {
+  background: #8a6a1a !important;
+  border-color: #c8a030 !important;
+}
+.btn-restore:hover { background: #a07a2a !important; }
+
 #tennaBtn {
   background: #2a1a3a !important;
   border-color: #8a4aaa !important;

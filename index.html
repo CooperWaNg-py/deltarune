@@ -116,6 +116,7 @@
           <div class="editor-actions">
             <button id="editorSave" class="btn-primary">Save Changes</button>
             <button id="editorDelete" class="btn-danger">Delete File</button>
+            <button id="editorRestoreBackup" class="btn-restore" hidden>Restore from Backup</button>
           </div>
         </div>
       </div>
@@ -388,6 +389,7 @@
       const editorTextarea = document.getElementById('editorTextarea');
       const editorSave = document.getElementById('editorSave');
       const editorDelete = document.getElementById('editorDelete');
+      const editorRestoreBackup = document.getElementById('editorRestoreBackup');
       const exportBtn = document.getElementById('exportSavesBtn');
       const importBtn = document.getElementById('importSavesBtn');
       const importInput = document.getElementById('importInput');
@@ -473,6 +475,17 @@
             const tx = db.transaction(STORE, 'readwrite');
             const req = tx.objectStore(STORE).delete(key);
             req.onsuccess = function() { db.close(); resolve(); };
+            req.onerror = function(e) { db.close(); reject(e.target.error); };
+          });
+        });
+      }
+
+      function getEntry(key) {
+        return openDB().then(function(db) {
+          return new Promise(function(resolve, reject) {
+            const tx = db.transaction(STORE, 'readonly');
+            const req = tx.objectStore(STORE).get(key);
+            req.onsuccess = function() { db.close(); resolve(req.result || null); };
             req.onerror = function(e) { db.close(); reject(e.target.error); };
           });
         });
@@ -711,6 +724,7 @@
         currentValue = value;
         editorFilename.textContent = key;
         hexPreview.hidden = true;
+        editorRestoreBackup.hidden = key.endsWith('.bak');
         try {
           var bytes = value && value.contents;
           if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
@@ -798,6 +812,31 @@
         if (!confirm('Delete "' + currentKey + '"?\nThis cannot be undone.')) return;
         deleteEntry(currentKey).then(refreshList).catch(function(err) {
           alert('Error deleting: ' + (err && err.message ? err.message : err));
+        });
+      });
+
+      editorRestoreBackup.addEventListener('click', function() {
+        if (!currentKey || currentKey.endsWith('.bak')) return;
+        if (!checkUnsaved()) return;
+        var bakKey = currentKey + '.bak';
+        getEntry(bakKey).then(function(bakValue) {
+          if (!bakValue) {
+            if (window.__launcher && window.__launcher.toast) window.__launcher.toast('No backup found for this file.');
+            else alert('No backup found for this file.');
+            return;
+          }
+          var newValue = {
+            contents: bakValue.contents,
+            mode: bakValue.mode || currentValue.mode || 33206,
+            timestamp: new Date()
+          };
+          return putEntry(currentKey, newValue).then(function() {
+            invalidateCache();
+            openEditor(currentKey, newValue);
+            if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Restored from backup.');
+          });
+        }).catch(function(err) {
+          alert('Error restoring from backup: ' + (err && err.message ? err.message : err));
         });
       });
 
