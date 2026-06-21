@@ -138,6 +138,7 @@
       const menu = document.getElementById('mainMenu');
       const logo = document.getElementById('logoContainer');
       let gamestarted = false;
+      let backTimer = null;
       window.__launcher = { isGameStarted: () => gamestarted };
       let selectedChapter = null;
       const rows = () => menu.querySelectorAll('.row');
@@ -150,7 +151,7 @@
       const versionTag = document.getElementById('versionTag');
       versionTag.textContent = 'v0.2.1 (' + new Date(document.lastModified).toISOString().split('T')[0] + ')';
 
-      function getSpeed() { return parseFloat(localStorage.getItem(SPEED_KEY)) || 1; }
+      function getSpeed() { var v = parseFloat(localStorage.getItem(SPEED_KEY)); return (isFinite(v) && v > 0) ? v : 1; }
       function setSpeed(v) {
         v = Math.round(v / 0.25) * 0.25;
         v = Math.max(0.25, Math.min(5, v));
@@ -179,7 +180,7 @@
       var volumeSlider = document.getElementById('volumeSlider');
       var volumeValue = document.getElementById('volumeValue');
       var VOLUME_KEY = 'deltarune_volume';
-      function getVolume() { return parseFloat(localStorage.getItem(VOLUME_KEY)) || 100; }
+      function getVolume() { var v = parseFloat(localStorage.getItem(VOLUME_KEY)); return isFinite(v) ? Math.max(0, Math.min(100, v)) : 100; }
       function setVolume(v) {
         v = Math.round(Math.max(0, Math.min(100, v)));
         localStorage.setItem(VOLUME_KEY, String(v));
@@ -239,6 +240,7 @@
 
       window.loadChapter = function(chapter) {
         if (gamestarted) return;
+        if (backTimer) { clearTimeout(backTimer); backTimer = null; }
         menuselectaudio.play().catch(function(){});
         gamestarted = true;
 
@@ -261,8 +263,10 @@
       function backToMenu() {
         if (!gamestarted) return;
         iframe.classList.remove('active');
-        setTimeout(function() {
+        if (backTimer) clearTimeout(backTimer);
+        backTimer = setTimeout(function() {
           iframe.src = 'about:blank';
+          backTimer = null;
         }, 500);
         gamestarted = false;
         selectedChapter = null;
@@ -556,7 +560,6 @@
       }
 
       function refreshList() {
-        if (!saveEditor.hidden) return;
         saveEditor.hidden = true;
         hexPreview.hidden = true;
         savesList.hidden = false;
@@ -922,15 +925,24 @@
         } else {
           savesWarning.hidden = true;
         }
+        saveEditor.hidden = true;
+        isDirty = false;
         refreshList();
         if (saveTimer) clearInterval(saveTimer);
-        saveTimer = setInterval(refreshList, 5000);
+        // Auto-refresh only while the list is showing and there are no unsaved edits.
+        // Invalidate the cache first so saves written by the running game are picked up.
+        saveTimer = setInterval(function() {
+          if (saveEditor.hidden && !isDirty) { invalidateCache(); refreshList(); }
+        }, 5000);
       }
       function closeModal() {
         if (cloudBusy) return;
         if (!checkUnsaved()) return;
         savesModal.hidden = true;
         savesWarning.hidden = true;
+        saveEditor.hidden = true;
+        hexPreview.hidden = true;
+        isDirty = false;
         currentKey = null;
         currentValue = null;
         if (saveTimer) clearInterval(saveTimer);
@@ -1052,6 +1064,7 @@
         return listAll().then(function(items) {
           var out = { version: 2, exportedAt: new Date().toISOString(), files: {} };
           items.forEach(function(item) {
+            if (isDirectory(item.value)) return; // never upload directory entries
             var v = item.value || {};
             var contents = v.contents;
             if (contents instanceof ArrayBuffer) contents = new Uint8Array(contents);
@@ -1070,24 +1083,42 @@
           return Promise.reject(new Error('Invalid cloud save data.'));
         }
         return listAll().then(function(localItems) {
-          var localKeys = {};
+          var localMap = {};
           localItems.forEach(function(item) {
-            if (!isDirectory(item.value)) localKeys[item.key] = true;
+            if (!isDirectory(item.value)) localMap[item.key] = item.value;
           });
-          var entries = Object.keys(data.files).filter(function(key) {
-            return localKeys[decodeKey(key)];
-          });
-          var promises = entries.map(function(key) {
-            var v = data.files[key];
+          var keys = Object.keys(data.files);
+          var created = 0, overwritten = 0, skipped = 0;
+          var promises = [];
+          keys.forEach(function(key) {
+            var v = data.files[key] || {};
+            // Skip directory entries that may exist in older cloud backups
+            if (typeof v.mode === 'number' && (v.mode & 0xF000) === 0x4000) { skipped++; return; }
+            var decoded = decodeKey(key);
             var value = {
               mode: typeof v.mode === 'number' ? v.mode : 33206,
               timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
               contents: v.contents ? fromBase64(v.contents) : new Uint8Array(0)
             };
-            return putEntry(decodeKey(key), value);
+            var existing = localMap[decoded];
+            if (existing) {
+              overwritten++;
+              // Back up the current local copy before overwriting (skip backing up backups)
+              if (decoded.slice(-4) !== '.bak') {
+                var bakValue = { contents: existing.contents, mode: existing.mode, timestamp: new Date() };
+                promises.push(putEntry(decoded + '.bak', bakValue).then(function() {
+                  return putEntry(decoded, value);
+                }));
+              } else {
+                promises.push(putEntry(decoded, value));
+              }
+            } else {
+              created++;
+              promises.push(putEntry(decoded, value));
+            }
           });
           return Promise.all(promises).then(function() {
-            return { updated: entries.length, total: Object.keys(data.files).length };
+            return { created: created, overwritten: overwritten, skipped: skipped, total: keys.length };
           });
         });
       }
@@ -1103,13 +1134,13 @@
           return getAllSavesAsObject();
         }).then(function(data) {
           if (!rtdb) { throw new Error('Firebase not initialized.'); }
-          // Estimate payload size: base64 is ~4/3 of original, plus JSON overhead
+          // Estimate payload size: contents are already base64 strings; add ~10% JSON overhead
           var estBytes = 0;
           for (var k in data.files) {
             var v = data.files[k];
             if (v.contents) estBytes += v.contents.length;
           }
-          var estPayload = Math.round(estBytes * 4 / 3 + 1024);
+          var estPayload = Math.round(estBytes * 1.1 + 1024);
           if (estPayload > 10 * 1024 * 1024) {
             if (!confirm('Upload size is estimated at ' + (estPayload / 1024 / 1024).toFixed(1) + ' MB. Continue?')) {
               uploadBtn.textContent = '\u2601 Upload';
@@ -1137,7 +1168,7 @@
       downloadBtn.addEventListener('click', function() {
         var path = getCloudPath();
         if (!path) { alert('Enter a Cloud ID first.'); return; }
-        if (!confirm('Download cloud saves? Only local files that also exist in the cloud will be updated.')) return;
+        if (!confirm('Download cloud saves?\nMissing files will be created, and existing files will be overwritten (a .bak backup is made of each first).')) return;
         downloadBtn.disabled = true;
         downloadBtn.textContent = '\u231b Downloading...';
         cloudBusy = true;
@@ -1153,10 +1184,12 @@
           return importSavesFromObject(data).then(function(result) {
             downloadBtn.textContent = '\u2601 Download';
             downloadBtn.disabled = false;
-            var msg = 'Updated ' + result.updated + ' file(s) from cloud.';
-            if (result.updated < result.total) msg += ' (' + (result.total - result.updated) + ' cloud-only files skipped)';
+            var msg = 'Downloaded from cloud: ' + result.created + ' new, ' + result.overwritten + ' updated';
+            if (result.skipped) msg += ', ' + result.skipped + ' skipped';
+            msg += '.';
             if (window.__launcher && window.__launcher.toast) window.__launcher.toast(msg);
             else alert(msg);
+            invalidateCache();
             refreshList();
           });
         }).catch(function(err) {
