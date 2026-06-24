@@ -117,6 +117,7 @@
             <button id="editorSave" class="btn-primary">Save Changes</button>
             <button id="editorDelete" class="btn-danger">Delete File</button>
             <button id="editorRestoreBackup" class="btn-restore" hidden>Restore from Backup</button>
+            <button id="editorGoOriginal" class="btn-restore" hidden>Go to Original</button>
           </div>
         </div>
       </div>
@@ -390,6 +391,7 @@
       const editorSave = document.getElementById('editorSave');
       const editorDelete = document.getElementById('editorDelete');
       const editorRestoreBackup = document.getElementById('editorRestoreBackup');
+      const editorGoOriginal = document.getElementById('editorGoOriginal');
       const exportBtn = document.getElementById('exportSavesBtn');
       const importBtn = document.getElementById('importSavesBtn');
       const importInput = document.getElementById('importInput');
@@ -724,7 +726,18 @@
         currentValue = value;
         editorFilename.textContent = key;
         hexPreview.hidden = true;
-        editorRestoreBackup.hidden = key.endsWith('.bak');
+        editorRestoreBackup.hidden = true;
+        editorGoOriginal.hidden = true;
+        if (key.endsWith('.bak')) {
+          var origKey = key.slice(0, -4);
+          getEntry(origKey).then(function(origVal) {
+            editorGoOriginal.hidden = !origVal;
+          }).catch(function() {});
+        } else {
+          getEntry(key + '.bak').then(function(bakVal) {
+            editorRestoreBackup.hidden = !bakVal;
+          }).catch(function() {});
+        }
         try {
           var bytes = value && value.contents;
           if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
@@ -821,6 +834,7 @@
         var bakKey = currentKey + '.bak';
         getEntry(bakKey).then(function(bakValue) {
           if (!bakValue) {
+            editorRestoreBackup.hidden = true;
             if (window.__launcher && window.__launcher.toast) window.__launcher.toast('No backup found for this file.');
             else alert('No backup found for this file.');
             return;
@@ -837,6 +851,23 @@
           });
         }).catch(function(err) {
           alert('Error restoring from backup: ' + (err && err.message ? err.message : err));
+        });
+      });
+
+      editorGoOriginal.addEventListener('click', function() {
+        if (!currentKey || !currentKey.endsWith('.bak')) return;
+        if (!checkUnsaved()) return;
+        var origKey = currentKey.slice(0, -4);
+        getEntry(origKey).then(function(origValue) {
+          if (!origValue) {
+            editorGoOriginal.hidden = true;
+            if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Original file not found.');
+            else alert('Original file not found.');
+            return;
+          }
+          openEditor(origKey, origValue);
+        }).catch(function(err) {
+          alert('Error opening original: ' + (err && err.message ? err.message : err));
         });
       });
 
@@ -1099,21 +1130,39 @@
         return key;
       }
 
+      function hashContent(bytes) {
+        if (typeof crypto !== 'undefined' && crypto.subtle) {
+          return crypto.subtle.digest('SHA-256', bytes).then(function(hash) {
+            var hex = '';
+            var view = new Uint8Array(hash);
+            for (var i = 0; i < view.length; i++) hex += ('00' + view[i].toString(16)).slice(-2);
+            return hex;
+          }).catch(function() { return null; });
+        }
+        return Promise.resolve(null);
+      }
+
       function getAllSavesAsObject() {
         return listAll().then(function(items) {
           var out = { version: 2, exportedAt: new Date().toISOString(), files: {} };
+          var hashPromises = [];
           items.forEach(function(item) {
-            if (isDirectory(item.value)) return; // never upload directory entries
+            if (isDirectory(item.value)) return;
             var v = item.value || {};
             var contents = v.contents;
             if (contents instanceof ArrayBuffer) contents = new Uint8Array(contents);
-            out.files[encodeKey(item.key)] = {
+            var b64 = contents instanceof Uint8Array ? toBase64(contents) : null;
+            var entry = {
               mode: v.mode,
               timestamp: v.timestamp instanceof Date ? v.timestamp.toISOString() : v.timestamp,
-              contents: contents instanceof Uint8Array ? toBase64(contents) : null
+              contents: b64
             };
+            hashPromises.push(hashContent(contents instanceof Uint8Array ? contents : null).then(function(h) {
+              if (h) entry.hash = h;
+            }));
+            out.files[encodeKey(item.key)] = entry;
           });
-          return out;
+          return Promise.all(hashPromises).then(function() { return out; });
         });
       }
 
@@ -1127,22 +1176,33 @@
             if (!isDirectory(item.value)) localMap[item.key] = item.value;
           });
           var keys = Object.keys(data.files);
-          var created = 0, overwritten = 0, skipped = 0;
+          var created = 0, overwritten = 0, skipped = 0, corrupt = 0;
           var promises = [];
+          var verifyPromises = [];
           keys.forEach(function(key) {
             var v = data.files[key] || {};
-            // Skip directory entries that may exist in older cloud backups
             if (typeof v.mode === 'number' && (v.mode & 0xF000) === 0x4000) { skipped++; return; }
             var decoded = decodeKey(key);
+            var contents = v.contents ? fromBase64(v.contents) : new Uint8Array(0);
+            // Verify content hash if present
+            if (v.hash) {
+              verifyPromises.push(hashContent(contents).then(function(computedHash) {
+                if (computedHash && computedHash !== v.hash) {
+                  corrupt++;
+                  if (window.__launcher && window.__launcher.toast) {
+                    window.__launcher.toast('Hash mismatch for ' + decoded + ' — data may be corrupt.');
+                  }
+                }
+              }));
+            }
             var value = {
               mode: typeof v.mode === 'number' ? v.mode : 33206,
               timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
-              contents: v.contents ? fromBase64(v.contents) : new Uint8Array(0)
+              contents: contents
             };
             var existing = localMap[decoded];
             if (existing) {
               overwritten++;
-              // Back up the current local copy before overwriting (skip backing up backups)
               if (decoded.slice(-4) !== '.bak') {
                 var bakValue = { contents: existing.contents, mode: existing.mode, timestamp: new Date() };
                 promises.push(putEntry(decoded + '.bak', bakValue).then(function() {
@@ -1156,8 +1216,8 @@
               promises.push(putEntry(decoded, value));
             }
           });
-          return Promise.all(promises).then(function() {
-            return { created: created, overwritten: overwritten, skipped: skipped, total: keys.length };
+          return Promise.all([Promise.all(promises), Promise.all(verifyPromises)]).then(function() {
+            return { created: created, overwritten: overwritten, skipped: skipped, corrupt: corrupt, total: keys.length };
           });
         });
       }
@@ -1225,6 +1285,7 @@
             downloadBtn.disabled = false;
             var msg = 'Downloaded from cloud: ' + result.created + ' new, ' + result.overwritten + ' updated';
             if (result.skipped) msg += ', ' + result.skipped + ' skipped';
+            if (result.corrupt) msg += ', ' + result.corrupt + ' HASH MISMATCH (data may be corrupt!)';
             msg += '.';
             if (window.__launcher && window.__launcher.toast) window.__launcher.toast(msg);
             else alert(msg);
