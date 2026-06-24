@@ -104,6 +104,8 @@
         <div id="savesWarning" class="saves-warning" hidden>Game is running — avoid editing while the game is saving.</div>
         <div class="saves-search-row">
           <input type="text" id="savesSearch" class="saves-search" placeholder="Filter filenames..." spellcheck="false">
+          <button id="searchClearBtn" class="search-clear-btn" hidden>&times;</button>
+          <button id="newFileBtn" class="new-file-btn">+ New</button>
           <span id="savesCount" class="saves-count"></span>
         </div>
         <div id="savesList" class="saves-list"></div>
@@ -111,6 +113,7 @@
           <div class="editor-header">
             <button id="editorBack" class="editor-back-btn">&#9664; Back</button>
             <span id="editorFilename" class="editor-filename"></span>
+            <button id="renameBtn" class="rename-btn" title="Rename file">&#9998;</button>
           </div>
           <textarea id="editorTextarea" spellcheck="false" autocomplete="off"></textarea>
           <div id="hexPreview" class="hex-preview" hidden></div>
@@ -408,6 +411,9 @@
       let saveTimer = null;
 
       var savesSearch = document.getElementById('savesSearch');
+      var searchClearBtn = document.getElementById('searchClearBtn');
+      var newFileBtn = document.getElementById('newFileBtn');
+      var renameBtn = document.getElementById('renameBtn');
       var savesCount = document.getElementById('savesCount');
 
       function markDirty() { isDirty = true; }
@@ -679,8 +685,16 @@
 
       var searchTimer = null;
       savesSearch.addEventListener('input', function() {
+        searchClearBtn.hidden = !savesSearch.value;
         if (searchTimer) clearTimeout(searchTimer);
         searchTimer = setTimeout(refreshList, 200);
+      });
+      searchClearBtn.addEventListener('click', function() {
+        savesSearch.value = '';
+        searchClearBtn.hidden = true;
+        if (searchTimer) clearTimeout(searchTimer);
+        refreshList();
+        savesSearch.focus();
       });
 
       function getChapterTag(key) {
@@ -777,9 +791,31 @@
         editorTextarea.focus();
         isDirty = false;
         currentOriginalText = editorTextarea.value;
+        // auto-save draft restoration
+        try {
+          var draft = sessionStorage.getItem('deltarune_draft_' + key);
+          if (draft && draft !== editorTextarea.value) {
+            if (confirm('Restore unsaved changes from last session for "' + key + '"?')) {
+              editorTextarea.value = draft;
+              isDirty = true;
+              currentOriginalText = draft;
+            } else {
+              sessionStorage.removeItem('deltarune_draft_' + key);
+            }
+          }
+        } catch(e) {}
       }
 
-      editorTextarea.addEventListener('input', markDirty);
+      var draftTimer = null;
+      editorTextarea.addEventListener('input', function() {
+        markDirty();
+        if (draftTimer) clearTimeout(draftTimer);
+        draftTimer = setTimeout(function() {
+          if (currentKey) {
+            try { sessionStorage.setItem('deltarune_draft_' + currentKey, editorTextarea.value); } catch(e) {}
+          }
+        }, 500);
+      });
 
       editorBack.addEventListener('click', function() {
         if (checkUnsaved()) refreshList();
@@ -815,6 +851,7 @@
             currentValue = newValue;
             isDirty = false;
             currentOriginalText = editorTextarea.value;
+            try { sessionStorage.removeItem('deltarune_draft_' + currentKey); } catch(e) {}
           }).catch(function(err) {
             alert('Error saving: ' + (err && err.message ? err.message : err));
           });
@@ -872,6 +909,52 @@
           openEditor(origKey, origValue);
         }).catch(function(err) {
           alert('Error opening original: ' + (err && err.message ? err.message : err));
+        });
+      });
+
+      renameBtn.addEventListener('click', function() {
+        if (!currentKey) return;
+        if (!checkUnsaved()) return;
+        var newName = prompt('New filename:', currentKey);
+        if (!newName || newName === currentKey) return;
+        if (newName.indexOf('/') !== -1 || newName.indexOf('..') !== -1) {
+          alert('Invalid filename.');
+          return;
+        }
+        cloudBusy = true;
+        getEntry(currentKey).then(function(val) {
+          if (!val) throw new Error('File not found: ' + currentKey);
+          return putEntry(newName, val).then(function() {
+            return deleteEntry(currentKey);
+          }).then(function() {
+            invalidateCache();
+            return openEditor(newName, val);
+          });
+        }).catch(function(err) {
+          alert('Error renaming: ' + (err && err.message ? err.message : err));
+        }).then(function() {
+          cloudBusy = false;
+        });
+      });
+
+      newFileBtn.addEventListener('click', function() {
+        var name = prompt('New save filename:');
+        if (!name) return;
+        if (name.indexOf('/') !== -1 || name.indexOf('..') !== -1) {
+          alert('Invalid filename.');
+          return;
+        }
+        var emptyVal = { contents: new Uint8Array(0), mode: 33206, timestamp: new Date() };
+        cloudBusy = true;
+        putEntry(name, emptyVal).then(function() {
+          invalidateCache();
+          return refreshList();
+        }).then(function() {
+          return openEditor(name, emptyVal);
+        }).catch(function(err) {
+          alert('Error creating file: ' + (err && err.message ? err.message : err));
+        }).then(function() {
+          cloudBusy = false;
         });
       });
 
@@ -1043,6 +1126,13 @@
         currentKey = null;
         currentValue = null;
         if (saveTimer) clearInterval(saveTimer);
+        // clear all auto-save drafts
+        try {
+          var keys = Object.keys(sessionStorage);
+          for (var i = 0; i < keys.length; i++) {
+            if (keys[i].indexOf('deltarune_draft_') === 0) sessionStorage.removeItem(keys[i]);
+          }
+        } catch(e) {}
       }
 
       // ── Firebase config ──────────────────────────────────────────────
