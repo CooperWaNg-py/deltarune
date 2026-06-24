@@ -556,6 +556,12 @@ img {
 
 .cloud-btn:hover { background: #333; border-color: #fefe00; }
 
+.sync-status {
+  font-size: 11px;
+  color: #888;
+  white-space: nowrap;
+}
+
 #uploadBtn { background: #1a3a2a !important; border-color: #4a8a5a !important; }
 #uploadBtn:hover { background: #2a4a3a !important; }
 #downloadBtn { background: #1a2a3a !important; border-color: #4a6a8a !important; }

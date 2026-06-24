@@ -98,6 +98,7 @@
         <input type="text" id="cloudId" placeholder="Cloud ID (e.g. player1)" class="cloud-input">
         <button id="uploadBtn" class="cloud-btn">&#9729; Upload</button>
         <button id="downloadBtn" class="cloud-btn">&#9729; Download</button>
+        <span id="syncStatus" class="sync-status"></span>
       </div>
       <div class="modal-body">
         <div id="savesWarning" class="saves-warning" hidden>Game is running — avoid editing while the game is saving.</div>
@@ -1260,6 +1261,65 @@
         });
       }
 
+      // ── Sync status ──────────────────────────────────────────────────
+      var LAST_UPLOAD_KEY = 'deltarune_last_upload';
+      var LAST_DOWNLOAD_KEY = 'deltarune_last_download';
+      var syncStatus = document.getElementById('syncStatus');
+
+      function updateSyncStatus() {
+        var parts = [];
+        try {
+          var up = localStorage.getItem(LAST_UPLOAD_KEY);
+          if (up) parts.push('Uploaded: ' + new Date(up).toLocaleString());
+          var down = localStorage.getItem(LAST_DOWNLOAD_KEY);
+          if (down) parts.push('Downloaded: ' + new Date(down).toLocaleString());
+        } catch(e) {}
+        syncStatus.textContent = parts.join(' \u00b7 ');
+      }
+
+      // Show sync status on modal open (called from openModal)
+      var origOpenModal = openModal;
+      openModal = function() { origOpenModal(); updateSyncStatus(); };
+
+      // ── Retry helper for transient Firebase failures ──────────────────
+      function firebaseRetry(fn, maxRetries) {
+        if (maxRetries === undefined) maxRetries = 2;
+        var lastErr;
+        function attempt(n) {
+          return fn().catch(function(err) {
+            lastErr = err;
+            if (n < maxRetries) {
+              return new Promise(function(r) { setTimeout(r, 1000 * (n + 1)); }).then(function() {
+                return attempt(n + 1);
+              });
+            }
+            throw lastErr;
+          });
+        }
+        return attempt(1);
+      }
+
+      // ── Diff preview for download ─────────────────────────────────────
+      function computeCloudDiff(cloudFiles, localFiles) {
+        var localMap = {};
+        localFiles.forEach(function(item) {
+          if (!isDirectory(item.value)) localMap[item.key] = item.value;
+        });
+        var created = 0, updated = 0, skipped = 0, bakWillCreate = 0;
+        Object.keys(cloudFiles).forEach(function(key) {
+          var v = cloudFiles[key] || {};
+          if (typeof v.mode === 'number' && (v.mode & 0xF000) === 0x4000) { skipped++; return; }
+          var decoded = decodeKey(key);
+          if (localMap[decoded]) {
+            updated++;
+            if (decoded.slice(-4) !== '.bak') bakWillCreate++;
+          } else {
+            created++;
+          }
+        });
+        return { created: created, updated: updated, skipped: skipped, bakWillCreate: bakWillCreate, total: Object.keys(cloudFiles).length };
+      }
+
       uploadBtn.addEventListener('click', function() {
         var path = getCloudPath();
         if (!path) { alert('Enter a Cloud ID first.'); return; }
@@ -1280,24 +1340,24 @@
           var estPayload = Math.round(estBytes * 1.1 + 1024);
           if (estPayload > 10 * 1024 * 1024) {
             if (!confirm('Upload size is estimated at ' + (estPayload / 1024 / 1024).toFixed(1) + ' MB. Continue?')) {
-              uploadBtn.textContent = '\u2601 Upload';
-              uploadBtn.disabled = false;
-              cloudBusy = false;
-              return;
+              return Promise.reject({ cancelled: true });
             }
           }
           data.uploadedAt = new Date().toISOString();
-          return rtdb.ref(path).set(data);
+          return firebaseRetry(function() { return rtdb.ref(path).set(data); });
         }).then(function() {
           uploadBtn.textContent = '\u2601 Upload';
           uploadBtn.disabled = false;
           if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Saves uploaded to cloud.');
           else alert('Saves uploaded successfully.');
+          try { localStorage.setItem(LAST_UPLOAD_KEY, new Date().toISOString()); } catch(e) {}
+          updateSyncStatus();
         }).catch(function(err) {
-          uploadBtn.textContent = '\u2601 Upload';
-          uploadBtn.disabled = false;
+          if (err && err.cancelled) return; // User cancelled — finally still runs
           alert('Upload failed: ' + (err && err.message ? err.message : err));
         }).finally(function() {
+          uploadBtn.textContent = '\u2601 Upload';
+          uploadBtn.disabled = false;
           cloudBusy = false;
         });
       });
@@ -1305,32 +1365,45 @@
       downloadBtn.addEventListener('click', function() {
         var path = getCloudPath();
         if (!path) { alert('Enter a Cloud ID first.'); return; }
-        if (!confirm('Download cloud saves?\nMissing files will be created, and existing files will be overwritten (a .bak backup is made of each first).')) return;
         downloadBtn.disabled = true;
-        downloadBtn.textContent = '\u231b Downloading...';
+        downloadBtn.textContent = '\u231b Checking...';
         cloudBusy = true;
+        var cloudData = null;
         initFirebase().then(function() {
           if (!rtdb) { throw new Error('Firebase not initialized.'); }
-          return rtdb.ref(path).once('value');
+          return firebaseRetry(function() { return rtdb.ref(path).once('value'); });
         }).then(function(snapshot) {
-          var data = snapshot.val();
-          if (!data) {
-            alert('No cloud saves found for this ID.');
-            return;
+          cloudData = snapshot.val();
+          if (!cloudData || !cloudData.files) {
+            return Promise.reject({ noData: true });
           }
-          return importSavesFromObject(data).then(function(result) {
-            downloadBtn.textContent = '\u2601 Download';
-            downloadBtn.disabled = false;
-            var msg = 'Downloaded from cloud: ' + result.created + ' new, ' + result.overwritten + ' updated';
-            if (result.skipped) msg += ', ' + result.skipped + ' skipped';
-            if (result.corrupt) msg += ', ' + result.corrupt + ' HASH MISMATCH (data may be corrupt!)';
-            msg += '.';
-            if (window.__launcher && window.__launcher.toast) window.__launcher.toast(msg);
-            else alert(msg);
-            invalidateCache();
-            refreshList();
-          });
+          // Compute diff preview
+          return listAll();
+        }).then(function(localItems) {
+          var diff = computeCloudDiff(cloudData.files, localItems);
+          var msg = 'Cloud has ' + diff.total + ' file(s). ';
+          if (diff.skipped) msg += diff.skipped + ' directory entries will be skipped. ';
+          msg += diff.created + ' new file(s), ' + diff.updated + ' update(s).';
+          if (diff.bakWillCreate) msg += ' ' + diff.bakWillCreate + ' .bak backup(s) will be created.';
+          if (!confirm('Download summary:\n' + msg + '\n\nContinue with download?')) {
+            return Promise.reject({ cancelled: true });
+          }
+          downloadBtn.textContent = '\u231b Downloading...';
+          return importSavesFromObject(cloudData);
+        }).then(function(result) {
+          var msg = 'Downloaded from cloud: ' + result.created + ' new, ' + result.overwritten + ' updated';
+          if (result.skipped) msg += ', ' + result.skipped + ' skipped';
+          if (result.corrupt) msg += ', ' + result.corrupt + ' HASH MISMATCH (data may be corrupt!)';
+          msg += '.';
+          if (window.__launcher && window.__launcher.toast) window.__launcher.toast(msg);
+          else alert(msg);
+          try { localStorage.setItem(LAST_DOWNLOAD_KEY, new Date().toISOString()); } catch(e) {}
+          updateSyncStatus();
+          invalidateCache();
+          refreshList();
         }).catch(function(err) {
+          if (err && err.cancelled) return; // User cancelled
+          if (err && err.noData) { alert('No cloud saves found for this ID.'); return; }
           alert('Download failed: ' + (err && err.message ? err.message : err));
         }).finally(function() {
           downloadBtn.textContent = '\u2601 Download';
