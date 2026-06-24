@@ -511,6 +511,12 @@ img {
 
 #tennaBtn:hover { background: #3a2a4a !important; }
 
+#clearBackupsBtn {
+  background: #4a3a1a !important;
+  border-color: #8a7a3a !important;
+}
+#clearBackupsBtn:hover { background: #5a4a2a !important; }
+
 /* Cloud sync row */
 .cloud-row {
   display: flex;

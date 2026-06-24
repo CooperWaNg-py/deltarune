@@ -126,6 +126,7 @@
         <button id="exportSavesBtn">Export All</button>
         <button id="importSavesBtn">Import</button>
         <input type="file" id="importInput" accept=".json,application/json" hidden>
+        <button id="clearBackupsBtn">Clear Backups</button>
       </div>
     </div>
   </div>
@@ -395,6 +396,7 @@
       const exportBtn = document.getElementById('exportSavesBtn');
       const importBtn = document.getElementById('importSavesBtn');
       const importInput = document.getElementById('importInput');
+      const clearBackupsBtn = document.getElementById('clearBackupsBtn');
       const tennaBtn = document.getElementById('tennaBtn');
 
       let currentKey = null;
@@ -579,7 +581,7 @@
         hexPreview.hidden = true;
         savesList.hidden = false;
         savesList.innerHTML = '<div class="saves-empty">Loading...</div>';
-        getCachedItems().then(function(items) {
+        return getCachedItems().then(function(items) {
           var filter = savesSearch.value.toLowerCase().trim();
           const files = items.filter(function(it) { return !isDirectory(it.value); });
           if (files.length === 0) {
@@ -665,6 +667,7 @@
           savesList.innerHTML = '<div class="saves-empty">Error loading saves:<br>' + (err && err.message ? err.message : err) + '</div>';
         });
       }
+      // Note: refreshList now returns a promise that resolves when rendering completes.
 
       var cachedItems = null;
       function getCachedItems() {
@@ -873,7 +876,7 @@
 
       exportBtn.addEventListener('click', function() {
         listAll().then(function(items) {
-          if (items.length === 0) { alert('Nothing to export.'); return; }
+          if (items.length === 0) { if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Nothing to export.'); else alert('Nothing to export.'); return; }
           const out = { version: 2, db: DB_NAME, exportedAt: new Date().toISOString(), files: {} };
           items.forEach(function(item) {
             const v = item.value || {};
@@ -926,13 +929,35 @@
             return putEntry(decodedKey, value);
           });
           return Promise.all(promises).then(function() {
-            alert('Imported ' + entries.length + ' file(s).');
+            if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Imported ' + entries.length + ' file(s).');
+            else alert('Imported ' + entries.length + ' file(s).');
             refreshList();
           });
         }).catch(function(err) {
           alert('Import failed: ' + (err && err.message ? err.message : err));
         }).finally(function() {
           importInput.value = '';
+        });
+      });
+
+      clearBackupsBtn.addEventListener('click', function() {
+        listAll().then(function(items) {
+          var bakItems = items.filter(function(item) { return item.key.endsWith('.bak'); });
+          if (bakItems.length === 0) {
+            if (window.__launcher && window.__launcher.toast) window.__launcher.toast('No backup files to clear.');
+            else alert('No backup files to clear.');
+            return;
+          }
+          if (!confirm('Delete all ' + bakItems.length + ' backup files?\nThis cannot be undone.')) return;
+          var promises = bakItems.map(function(item) { return deleteEntry(item.key); });
+          return Promise.all(promises).then(function() {
+            if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Deleted ' + bakItems.length + ' backup file(s).');
+            else alert('Deleted ' + bakItems.length + ' backup file(s).');
+            invalidateCache();
+            refreshList();
+          });
+        }).catch(function(err) {
+          alert('Error clearing backups: ' + (err && err.message ? err.message : err));
         });
       });
 
@@ -971,7 +996,8 @@
             timestamp: new Date()
           };
           putEntry(key, val).then(function() {
-            alert('Save updated from Tenna Editor.');
+            if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Save updated from Tenna Editor.');
+            else alert('Save updated from Tenna Editor.');
             refreshList();
           }).catch(function(err) {
             alert('Error saving: ' + (err && err.message ? err.message : err));
@@ -1037,6 +1063,13 @@
       var cloudIdInput = document.getElementById('cloudId');
       var uploadBtn = document.getElementById('uploadBtn');
       var downloadBtn = document.getElementById('downloadBtn');
+      var CLOUD_ID_KEY = 'deltarune_cloud_id';
+
+      // Restore persisted Cloud ID
+      try { var savedId = localStorage.getItem(CLOUD_ID_KEY); if (savedId) cloudIdInput.value = savedId; } catch(e) {}
+      cloudIdInput.addEventListener('input', function() {
+        try { localStorage.setItem(CLOUD_ID_KEY, cloudIdInput.value.trim()); } catch(e) {}
+      });
 
       function getCloudPath() {
         var id = cloudIdInput.value.trim();
@@ -1177,47 +1210,52 @@
           });
           var keys = Object.keys(data.files);
           var created = 0, overwritten = 0, skipped = 0, corrupt = 0;
-          var promises = [];
           var verifyPromises = [];
+          // Write files one at a time to avoid racing with the game's IDBFS sync
+          var chain = Promise.resolve();
           keys.forEach(function(key) {
-            var v = data.files[key] || {};
-            if (typeof v.mode === 'number' && (v.mode & 0xF000) === 0x4000) { skipped++; return; }
-            var decoded = decodeKey(key);
-            var contents = v.contents ? fromBase64(v.contents) : new Uint8Array(0);
-            // Verify content hash if present
-            if (v.hash) {
-              verifyPromises.push(hashContent(contents).then(function(computedHash) {
-                if (computedHash && computedHash !== v.hash) {
-                  corrupt++;
-                  if (window.__launcher && window.__launcher.toast) {
-                    window.__launcher.toast('Hash mismatch for ' + decoded + ' — data may be corrupt.');
+            chain = chain.then(function() {
+              var v = data.files[key] || {};
+              if (typeof v.mode === 'number' && (v.mode & 0xF000) === 0x4000) { skipped++; return; }
+              var decoded = decodeKey(key);
+              var contents = v.contents ? fromBase64(v.contents) : new Uint8Array(0);
+              // Verify content hash if present (async but fire-and-forget)
+              if (v.hash) {
+                verifyPromises.push(hashContent(contents).then(function(computedHash) {
+                  if (computedHash && computedHash !== v.hash) {
+                    corrupt++;
+                    if (window.__launcher && window.__launcher.toast) {
+                      window.__launcher.toast('Hash mismatch for ' + decoded + ' — data may be corrupt.');
+                    }
                   }
-                }
-              }));
-            }
-            var value = {
-              mode: typeof v.mode === 'number' ? v.mode : 33206,
-              timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
-              contents: contents
-            };
-            var existing = localMap[decoded];
-            if (existing) {
-              overwritten++;
-              if (decoded.slice(-4) !== '.bak') {
-                var bakValue = { contents: existing.contents, mode: existing.mode, timestamp: new Date() };
-                promises.push(putEntry(decoded + '.bak', bakValue).then(function() {
-                  return putEntry(decoded, value);
                 }));
-              } else {
-                promises.push(putEntry(decoded, value));
               }
-            } else {
-              created++;
-              promises.push(putEntry(decoded, value));
-            }
+              var value = {
+                mode: typeof v.mode === 'number' ? v.mode : 33206,
+                timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
+                contents: contents
+              };
+              var existing = localMap[decoded];
+              if (existing) {
+                overwritten++;
+                if (decoded.slice(-4) !== '.bak') {
+                  var bakValue = { contents: existing.contents, mode: existing.mode, timestamp: new Date() };
+                  return putEntry(decoded + '.bak', bakValue).then(function() {
+                    return putEntry(decoded, value);
+                  });
+                } else {
+                  return putEntry(decoded, value);
+                }
+              } else {
+                created++;
+                return putEntry(decoded, value);
+              }
+            });
           });
-          return Promise.all([Promise.all(promises), Promise.all(verifyPromises)]).then(function() {
-            return { created: created, overwritten: overwritten, skipped: skipped, corrupt: corrupt, total: keys.length };
+          return chain.then(function() {
+            return Promise.all(verifyPromises).then(function() {
+              return { created: created, overwritten: overwritten, skipped: skipped, corrupt: corrupt, total: keys.length };
+            });
           });
         });
       }
