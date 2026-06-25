@@ -368,6 +368,19 @@ img {
 }
 .new-file-btn:hover { background: #2a4a3a; }
 
+.sort-select {
+  background: #0a0a0a;
+  color: #ccc;
+  border: 1px solid #555;
+  padding: 4px 6px;
+  font-family: monospace;
+  font-size: 12px;
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+}
+.sort-select:focus { border-color: #fefe00; }
+
 .rename-btn {
   background: none;
   border: none;
@@ -850,6 +863,28 @@ img {
 
   .modal-content { font-size: 13px; }
   .modal-header h2 { font-size: 18px; }
+
+  .modal-content {
+    max-width: 98vw;
+    max-height: 95vh;
+  }
+
+  .saves-search-row {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px;
+  }
+  .saves-search { min-width: 120px; }
+
+  .save-item { padding: 8px; }
+
+  .editor-header { flex-wrap: wrap; }
+  .editor-filename { word-break: break-all; }
+  .editor-actions { flex-wrap: wrap; gap: 6px; }
+  .editor-actions button { flex: 1 1 auto; font-size: 12px; padding: 6px 8px; }
+
+  .save-meta { flex-wrap: wrap; gap: 4px; }
+  .save-export-one { font-size: 11px; padding: 2px 6px; }
 }
 
 @media (max-width: 400px) {
@@ -868,3 +903,12 @@ img {
     height: 30px;
   }
 }
+
+mark {
+  background: #555a00;
+  color: #ffe;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+

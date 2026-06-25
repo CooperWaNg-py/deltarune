@@ -106,6 +106,12 @@
           <input type="text" id="savesSearch" class="saves-search" placeholder="Filter filenames..." spellcheck="false">
           <button id="searchClearBtn" class="search-clear-btn" hidden>&times;</button>
           <button id="newFileBtn" class="new-file-btn">+ New</button>
+          <select id="sortSelect" class="sort-select">
+            <option value="name">Name</option>
+            <option value="chapter">Chapter</option>
+            <option value="size">Size</option>
+            <option value="date">Date</option>
+          </select>
           <span id="savesCount" class="saves-count"></span>
         </div>
         <div id="savesList" class="saves-list"></div>
@@ -414,6 +420,8 @@
       var searchClearBtn = document.getElementById('searchClearBtn');
       var newFileBtn = document.getElementById('newFileBtn');
       var renameBtn = document.getElementById('renameBtn');
+      var sortSelect = document.getElementById('sortSelect');
+      var sortBy = 'name';
       var savesCount = document.getElementById('savesCount');
 
       function markDirty() { isDirty = true; }
@@ -468,7 +476,8 @@
       }
 
       function putEntry(key, value) {
-        cachedItems = null;
+        delete valueCache[key];
+        delete valueCache[key + '.bak'];
         return openDB().then(function(db) {
           return new Promise(function(resolve, reject) {
             const tx = db.transaction(STORE, 'readwrite');
@@ -480,7 +489,7 @@
       }
 
       function deleteEntry(key) {
-        cachedItems = null;
+        delete valueCache[key];
         return openDB().then(function(db) {
           return new Promise(function(resolve, reject) {
             const tx = db.transaction(STORE, 'readwrite');
@@ -583,105 +592,199 @@
         setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
       }
 
+      function listKeys() {
+        return openDB().then(function(db) {
+          return new Promise(function(resolve, reject) {
+            var tx = db.transaction(STORE, 'readonly');
+            var req = tx.objectStore(STORE).getAllKeys();
+            req.onsuccess = function() { db.close(); resolve(req.result); };
+            req.onerror = function(e) { db.close(); reject(e.target.error); };
+          });
+        });
+      }
+
+      var valueCache = {};
+
+      function sortKeys(a, b) {
+        if (sortBy === 'name') return a.localeCompare(b);
+        if (sortBy === 'chapter') {
+          var tagA = getChapterTag(a) || 'zzz';
+          var tagB = getChapterTag(b) || 'zzz';
+          if (tagA !== tagB) return tagA.localeCompare(tagB);
+          return a.localeCompare(b);
+        }
+        return 0; // size/date handled separately
+      }
+
+      function renderAndLoad(keyList, filter) {
+        savesList.innerHTML = '';
+        keyList.forEach(function(key) {
+          var tag = getChapterTag(key);
+          var div = document.createElement('div');
+          div.className = 'save-item';
+          div.tabIndex = 0;
+          var nameSpan = document.createElement('div');
+          nameSpan.className = 'save-name';
+          highlightText(nameSpan, key, filter);
+          if (tag) {
+            var tagSpan = document.createElement('span');
+            tagSpan.className = 'save-chapter-tag';
+            tagSpan.textContent = tag;
+            nameSpan.appendChild(tagSpan);
+          }
+          if (key.endsWith('.bak')) {
+            var bakTag = document.createElement('span');
+            bakTag.className = 'save-chapter-tag';
+            bakTag.textContent = 'backup';
+            nameSpan.appendChild(bakTag);
+          }
+          var row2 = document.createElement('div');
+          row2.className = 'save-meta';
+          row2.innerHTML = '<span class="save-size-placeholder">\u2014</span>';
+          var exportOne = document.createElement('button');
+          exportOne.className = 'save-export-one';
+          exportOne.textContent = 'Export';
+          (function(k) {
+            exportOne.addEventListener('click', function(e) {
+              e.stopPropagation();
+              loadValue(k).then(function(val) {
+                if (val) saveSingleFile(k, val);
+              });
+            });
+          })(key);
+          row2.appendChild(exportOne);
+          div.appendChild(nameSpan);
+          div.appendChild(row2);
+          (function(k) {
+            div.addEventListener('click', function() {
+              loadValue(k).then(function(val) {
+                if (val) openEditor(k, val);
+              });
+            });
+          })(key);
+          div.addEventListener('keydown', function(e) {
+            if ((e.key === 'Enter' || e.key === ' ') && !e.target.closest('button')) {
+              e.preventDefault();
+              div.click();
+            }
+          });
+          savesList.appendChild(div);
+        });
+        // async load sizes and cache values
+        openDB().then(function(db) {
+          var tx = db.transaction(STORE, 'readonly');
+          var req = tx.objectStore(STORE).openCursor();
+          req.onsuccess = function(e) {
+            var cursor = e.target.result;
+            if (cursor) {
+              var k = cursor.primaryKey;
+              var v = cursor.value;
+              if (v && v.contents && !k.endsWith('/')) {
+                valueCache[k] = v;
+                var idx = keyList.indexOf(k);
+                if (idx !== -1) {
+                  var els = savesList.querySelectorAll('.save-item');
+                  var sizeEl = els[idx] && els[idx].querySelector('.save-size-placeholder');
+                  if (sizeEl) sizeEl.textContent = formatSize(v.contents.byteLength || v.contents.length || 0);
+                }
+              }
+              cursor.continue();
+            } else {
+              db.close();
+            }
+          };
+          req.onerror = function() { db.close(); };
+        });
+      }
+
+      function loadValue(key) {
+        if (valueCache[key]) return Promise.resolve(valueCache[key]);
+        return getEntry(key).then(function(v) { if (v) valueCache[key] = v; return v; });
+      }
+
       function refreshList() {
         saveEditor.hidden = true;
         hexPreview.hidden = true;
         savesList.hidden = false;
         savesList.innerHTML = '<div class="saves-empty">Loading...</div>';
-        return getCachedItems().then(function(items) {
+        if (sortBy === 'size' || sortBy === 'date') {
+          // load full data first for comparison
+          return listAll().then(function(items) {
+            valueCache = {};
+            var allFiles = items.filter(function(it) { return !isDirectory(it.value); });
+            if (allFiles.length === 0) {
+              savesList.innerHTML = '<div class="saves-empty">No save files found.<br><span class="saves-hint">Launch a chapter and create a save first.</span></div>';
+              savesCount.textContent = '';
+              return;
+            }
+            var filter = savesSearch.value.toLowerCase().trim();
+            var filtered = allFiles;
+            if (filter) filtered = allFiles.filter(function(f) { return f.key.toLowerCase().indexOf(filter) !== -1; });
+            if (filtered.length === 0) {
+              savesList.innerHTML = '<div class="saves-empty">No files match filter.</div>';
+              savesCount.textContent = '0 / ' + allFiles.length + ' files';
+              return;
+            }
+            filtered.sort(function(a, b) {
+              if (sortBy === 'size') {
+                var sa = a.value && a.value.contents ? (a.value.contents.byteLength || a.value.contents.length || 0) : 0;
+                var sb = b.value && b.value.contents ? (b.value.contents.byteLength || b.value.contents.length || 0) : 0;
+                return sb - sa;
+              }
+              if (sortBy === 'date') {
+                var da = a.value && a.value.timestamp ? new Date(a.value.timestamp).getTime() : 0;
+                var db = b.value && b.value.timestamp ? new Date(b.value.timestamp).getTime() : 0;
+                return db - da;
+              }
+              return a.key.localeCompare(b.key);
+            });
+            var keys = filtered.map(function(f) { return f.key; });
+            filtered.forEach(function(f) { valueCache[f.key] = f.value; });
+            savesCount.textContent = keys.length + ' / ' + allFiles.length + ' files';
+            renderAndLoad(keys, filter);
+          });
+        }
+        return listKeys().then(function(keys) {
           var filter = savesSearch.value.toLowerCase().trim();
-          const files = items.filter(function(it) { return !isDirectory(it.value); });
-          if (files.length === 0) {
+          var items = keys.filter(function(k) { return !k.endsWith('/'); });
+          if (items.length === 0) {
             savesList.innerHTML = '<div class="saves-empty">No save files found.<br><span class="saves-hint">Launch a chapter and create a save first.</span></div>';
             savesCount.textContent = '';
             return;
           }
-          var filtered = files;
+          var filtered = items;
           if (filter) {
-            filtered = files.filter(function(f) { return f.key.toLowerCase().indexOf(filter) !== -1; });
+            filtered = items.filter(function(k) { return k.toLowerCase().indexOf(filter) !== -1; });
           }
-          savesCount.textContent = filtered.length + ' / ' + files.length + ' files';
+          savesCount.textContent = filtered.length + ' / ' + items.length + ' files';
           if (filtered.length === 0) {
             savesList.innerHTML = '<div class="saves-empty">No files match filter.</div>';
             return;
           }
-          filtered.sort(function(a, b) { return a.key.localeCompare(b.key); });
-          savesList.innerHTML = '';
-          filtered.forEach(function(item) {
-            var data = item.value && item.value.contents;
-            if (data instanceof ArrayBuffer) data = new Uint8Array(data);
-            var size = data ? data.length : 0;
-            const text = tryDecodeText(data);
-            const isText = text !== null;
-            var tag = getChapterTag(item.key);
-            var preview = '';
-            if (data && data.length > 0) {
-              if (isText) {
-                var lines = text.split('\n');
-                preview = lines.slice(0, 3).map(function(l) { return l.trim().substring(0, 80); }).filter(Boolean).join(' | ');
-              } else {
-                var hex = '';
-                for (var pi = 0; pi < Math.min(8, data.length); pi++) hex += ('00' + data[pi].toString(16)).slice(-2) + ' ';
-                preview = hex.trim() + '...';
-              }
-            }
-            const div = document.createElement('div');
-            div.className = 'save-item';
-            div.tabIndex = 0;
-            const nameSpan = document.createElement('div');
-            nameSpan.className = 'save-name';
-            nameSpan.textContent = item.key;
-            if (tag) {
-              var tagSpan = document.createElement('span');
-              tagSpan.className = 'save-chapter-tag';
-              tagSpan.textContent = tag;
-              nameSpan.appendChild(tagSpan);
-            }
-            if (item.key.endsWith('.bak')) {
-              var bakTag = document.createElement('span');
-              bakTag.className = 'save-chapter-tag';
-              bakTag.textContent = 'backup';
-              nameSpan.appendChild(bakTag);
-            }
-            const row2 = document.createElement('div');
-            row2.className = 'save-meta';
-            const metaSpan = document.createElement('span');
-            metaSpan.textContent = formatSize(size) + ' \u00b7 ' + (isText ? 'text' : 'binary');
-            row2.appendChild(metaSpan);
-            if (preview) {
-              var prevSpan = document.createElement('div');
-              prevSpan.className = 'save-preview';
-              prevSpan.textContent = preview;
-              row2.appendChild(prevSpan);
-            }
-            const exportOne = document.createElement('button');
-            exportOne.className = 'save-export-one';
-            exportOne.textContent = 'Export';
-            exportOne.addEventListener('click', function(e) {
-              e.stopPropagation();
-              saveSingleFile(item.key, item.value);
-            });
-            row2.appendChild(exportOne);
-            div.appendChild(nameSpan);
-            div.appendChild(row2);
-            div.addEventListener('click', function() { openEditor(item.key, item.value); });
-            div.addEventListener('keydown', function(e) {
-              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openEditor(item.key, item.value); }
-            });
-            savesList.appendChild(div);
-          });
+          filtered.sort(sortKeys);
+          renderAndLoad(filtered, filter);
         }).catch(function(err) {
           savesList.innerHTML = '<div class="saves-empty">Error loading saves:<br>' + (err && err.message ? err.message : err) + '</div>';
         });
       }
-      // Note: refreshList now returns a promise that resolves when rendering completes.
 
-      var cachedItems = null;
-      function getCachedItems() {
-        if (cachedItems) return Promise.resolve(cachedItems);
-        return listAll().then(function(items) { cachedItems = items; return items; });
+      function highlightText(container, text, query) {
+        if (!query) { container.textContent = text; return; }
+        var escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        var parts = text.split(new RegExp('(' + escaped + ')', 'gi'));
+        container.innerHTML = '';
+        parts.forEach(function(p) {
+          if (p.toLowerCase() === query) {
+            var mark = document.createElement('mark');
+            mark.textContent = p;
+            container.appendChild(mark);
+          } else {
+            container.appendChild(document.createTextNode(p));
+          }
+        });
       }
-      function invalidateCache() { cachedItems = null; }
+
+      function invalidateCache() { valueCache = {}; }
 
       var searchTimer = null;
       savesSearch.addEventListener('input', function() {
@@ -695,6 +798,10 @@
         if (searchTimer) clearTimeout(searchTimer);
         refreshList();
         savesSearch.focus();
+      });
+      sortSelect.addEventListener('change', function() {
+        sortBy = sortSelect.value;
+        refreshList();
       });
 
       function getChapterTag(key) {
