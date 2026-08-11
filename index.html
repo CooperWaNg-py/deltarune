@@ -36,10 +36,10 @@
       <span class="title">Prophecy</span>
       <img src="icons/4.png" alt="" loading="lazy">
     </a>
-    <a href="javascript:void(0)" onclick="alert('Chapter 5 coming soon!')" class="disabled-row" role="button" aria-disabled="true" tabindex="-1" aria-label="Chapter 5 coming soon">
+    <a href="javascript:void(0)" onclick="loadChapter(5)" class="row" role="button" tabindex="0" aria-label="Chapter 5 Festival Day">
       <span class="chapter">Chapter 5</span>
-      <span class="disabled-title">--</span>
-      <img src="icons/0.png" alt="" loading="lazy">
+      <span class="title">Festival Day</span>
+      <img src="icons/5.png" alt="" loading="lazy">
     </a>
     <a href="javascript:void(0)" onclick="alert('Chapter 6 coming soon!')" class="disabled-row" role="button" aria-disabled="true" tabindex="-1" aria-label="Chapter 6 coming soon">
       <span class="chapter">Chapter 6</span>
@@ -251,6 +251,16 @@
       }
       window.__launcher.toast = toast;
 
+      // Chapters 1-4 are standalone builds at chapterN/index.html.
+      // Chapter 5 ships as part of the multi-chapter build in test/, which
+      // selects the chapter via the ?c= query parameter.
+      var CHAPTER_URLS = {
+        5: 'test/index.html?c=5'
+      };
+      function chapterUrl(chapter) {
+        return CHAPTER_URLS[chapter] || ('chapter' + chapter + '/index.html');
+      }
+
       window.loadChapter = function(chapter) {
         if (gamestarted) return;
         if (backTimer) { clearTimeout(backTimer); backTimer = null; }
@@ -264,7 +274,7 @@
         backBtn.style.display = 'block';
         versionTag.style.display = 'none';
 
-        iframe.src = 'chapter' + chapter + '/index.html';
+        iframe.src = chapterUrl(chapter);
         iframe.classList.add('active');
 
         iframe.onload = function() {
@@ -807,10 +817,9 @@
       function getChapterTag(key) {
         var m = key.match(/filech(\d)/);
         if (m) return 'Ch. ' + m[1];
-        if (key.indexOf('ch1') !== -1 || key.indexOf('chapter1') !== -1) return 'Ch. 1';
-        if (key.indexOf('ch2') !== -1 || key.indexOf('chapter2') !== -1) return 'Ch. 2';
-        if (key.indexOf('ch3') !== -1 || key.indexOf('chapter3') !== -1) return 'Ch. 3';
-        if (key.indexOf('ch4') !== -1 || key.indexOf('chapter4') !== -1) return 'Ch. 4';
+        for (var n = 1; n <= 7; n++) {
+          if (key.indexOf('ch' + n) !== -1 || key.indexOf('chapter' + n) !== -1) return 'Ch. ' + n;
+        }
         return '';
       }
 
