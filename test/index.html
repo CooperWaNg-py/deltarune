@@ -2,10 +2,11 @@
 <html lang="en-us">
 
 <head>
-    <body oncontextmenu="return false;">
     <meta charset="utf-8" />
+    <link rel="icon" href="../logo.png" />
     <!-- Launcher speed/volume control. Must load before the GameMaker runner. -->
     <script src="speed.js"></script>
+    <body oncontextmenu="return false;">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
     <meta name="viewport" content="viewport-fit=cover, width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0" />
     <title>DELTARUNE</title>
@@ -1257,6 +1258,16 @@ if (!deltaruneArchives[requestedChapter]) console.warn("Unknown Deltarune chapte
                         };
                         request.onsuccess = (event) => {
                             db = event.target.result;
+                            // The GameMaker runner repairs the /_savedata schema on boot by
+                            // reopening this database at a higher version. Holding this
+                            // connection open blocks that upgrade, and the runner's
+                            // onblocked handler never resumes booting, so the game hangs.
+                            // Drop the connection on demand and reopen lazily.
+                            db.onversionchange = () => {
+                                try { db.close(); } catch (e) {}
+                                db = null;
+                                console.warn("Save manager: closed /_savedata for runner schema upgrade.");
+                            };
                             console.log("IndexedDB opened successfully.");
                             resolve(db);
                         };
