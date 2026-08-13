@@ -135,3 +135,110 @@
   });
 })();
 
+// ── Save storage host API (window.oprt.gameStorage) ─────────────────────────
+// The GameMaker runner mounts /_savedata through GXMFS when window.oprt.gameStorage
+// exists, and reads/writes every save through it. The launcher's save manager also
+// uses this same IndexedDB (/_savedata → object store FILE_DATA) with full-path
+// keys (/_savedata/filech4_3) and {timestamp, mode, contents} values, so providing
+// gameStorage here makes the runner and the launcher share one store. Without this,
+// the host that actually loads the game supplies its own gameStorage with a different
+// scheme and the launcher's imported/edited saves are never seen by the game.
+(function() {
+  if (typeof indexedDB === 'undefined') return;
+  var SAVE_DB = '/_savedata';
+  var STORE = 'FILE_DATA';
+
+  function openDB() {
+    return new Promise(function(resolve, reject) {
+      var req = indexedDB.open(SAVE_DB);
+      req.onerror = function() { reject(req.error); };
+      req.onsuccess = function() {
+        var db = req.result;
+        if (db.objectStoreNames.contains(STORE)) { resolve(db); return; }
+        db.close();
+        var up = indexedDB.open(SAVE_DB, db.version + 1);
+        up.onupgradeneeded = function(e) {
+          var s = e.target.result;
+          var store = s.objectStoreNames.contains(STORE)
+            ? e.target.transaction.objectStore(STORE)
+            : s.createObjectStore(STORE);
+          if (!store.indexNames.contains('timestamp')) {
+            store.createIndex('timestamp', 'timestamp', { unique: false });
+          }
+        };
+        up.onsuccess = function() { resolve(up.result); };
+        up.onerror = function() { reject(up.error); };
+      };
+    });
+  }
+
+  function store(mode) {
+    return openDB().then(function(db) {
+      return new Promise(function(resolve, reject) {
+        var t = db.transaction(STORE, mode);
+        var s = t.objectStore(STORE);
+        t.oncomplete = function() { db.close(); };
+        t.onabort = t.onerror = function() { db.close(); reject(t.error); };
+        resolve(s);
+      });
+    });
+  }
+
+  function list() {
+    return store('readonly').then(function(s) {
+      return new Promise(function(resolve, reject) {
+        var out = {};
+        var req = s.openCursor();
+        req.onsuccess = function() {
+          var c = req.result;
+          if (!c) { resolve(out); return; }
+          out[c.primaryKey] = { timestamp: c.value && c.value.timestamp };
+          c.continue();
+        };
+        req.onerror = function() { reject(req.error); };
+      });
+    });
+  }
+
+  function get(key) {
+    return store('readonly').then(function(s) {
+      return new Promise(function(resolve, reject) {
+        var req = s.get(key);
+        req.onsuccess = function() { resolve(req.result || null); };
+        req.onerror = function() { reject(req.error); };
+      });
+    });
+  }
+
+  function put(value, key) {
+    return store('readwrite').then(function(s) {
+      return new Promise(function(resolve, reject) {
+        var req = s.put(value, key);
+        req.onsuccess = function() { resolve(); };
+        req.onerror = function() { reject(req.error); };
+      });
+    });
+  }
+
+  function del(key) {
+    return store('readwrite').then(function(s) {
+      return new Promise(function(resolve, reject) {
+        var req = s.delete(key);
+        req.onsuccess = function() { resolve(); };
+        req.onerror = function() { reject(req.error); };
+      });
+    });
+  }
+
+  var gameStorage = { open: function() { return { list: list, get: get, put: put, delete: del }; } };
+
+  window.oprt = window.oprt || {};
+  window.oprt.gameStorage = gameStorage;
+
+  // The runner also calls the rest of the oprt host API; provide no-op stubs if
+  // the host page didn't (the launcher handles fullscreen/close itself).
+  var noop = function() {};
+  ['closeTab', 'enterFullscreen', 'exitFullscreen', 'lockPortraitOrientation', 'lockLandscapeOrientation']
+    .forEach(function(m) { if (typeof window.oprt[m] !== 'function') window.oprt[m] = noop; });
+})();
+
