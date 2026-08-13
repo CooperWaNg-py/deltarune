@@ -1,12 +1,13 @@
-// ── /_savedata schema + version reconciliation ──────────────────────────────
-// Three clients share this database: the GameMaker runner's IDBFS (which always
-// asks for version 21), the launcher's save manager (which opens unversioned)
-// and the multi-chapter build's in-page manager. IndexedDB rejects any open()
-// whose fixed version is below the version already on disk, and IDBFS swallows
-// that error — so once any client pushed the version up (the chapter-5 build
-// used to force it past 2048 and then +1 on every load), every chapter booted
-// with an EMPTY /_savedata: no saves loaded, nothing persisted, while the
-// launcher still listed everything.
+// ── IndexedDB version + schema reconciliation ───────────────────────────────
+// Several clients share the game's databases: the runner's IDBFS (which always
+// asks for /_savedata at version 21) and its asset cache (emscripten_filesystem
+// at fixed version 1), the launcher's save manager (unversioned) and the
+// multi-chapter build's in-page manager. IndexedDB rejects any open() whose
+// fixed version is below the version already on disk, and both callers swallow
+// that error — so once a client pushed a version up (the chapter-5 build used
+// to force /_savedata past 2048, and emscripten_filesystem with it), chapters
+// booted with an EMPTY /_savedata and no asset cache, while the launcher still
+// listed every save.
 // This is the only place in the project allowed to touch indexedDB.open.
 (function() {
   if (typeof indexedDB === 'undefined' || typeof IDBFactory === 'undefined') return;
@@ -14,26 +15,35 @@
   var SAVE_DB = '/_savedata';
   var STORE = 'FILE_DATA';
   var BASE_VERSION = 21;              // the version IDBFS itself requests
-  var VERSION_HINT_KEY = 'deltarune_savedb_version';
+  var CACHE_DB = 'emscripten_filesystem';   // the runner's asset cache
+  var VERSION_HINT_KEY = 'deltarune_idb_versions';
 
   var nativeOpen = IDBFactory.prototype.open;
   if (!nativeOpen || nativeOpen.deltaruneSavePatch) return;
 
   // Seeded synchronously so the very first open of the page — even one that
-  // beats the async probe below — already knows not to ask for version 21 on a
-  // database that sits higher.
-  var storedVersion = 0;
+  // beats the async probe below — already knows not to ask for a version below
+  // what is on disk.
+  var known = {};
+  known[SAVE_DB] = 0;
+  known[CACHE_DB] = 0;
   try {
-    var hint = parseInt(localStorage.getItem(VERSION_HINT_KEY), 10);
-    if (isFinite(hint) && hint > 0) storedVersion = hint;
+    var hint = JSON.parse(localStorage.getItem(VERSION_HINT_KEY) || '{}');
+    Object.keys(known).forEach(function(name) {
+      var v = parseInt(hint[name], 10);
+      if (isFinite(v) && v > 0) known[name] = v;
+    });
   } catch (e) {}
 
-  function track(db) {
+  function remember(name, version) {
+    if (!(name in known) || !(version > known[name])) return;
+    known[name] = version;
+    try { localStorage.setItem(VERSION_HINT_KEY, JSON.stringify(known)); } catch (e) {}
+  }
+
+  function track(name, db) {
     if (!db) return db;
-    if (db.version > storedVersion) {
-      storedVersion = db.version;
-      try { localStorage.setItem(VERSION_HINT_KEY, String(storedVersion)); } catch (e) {}
-    }
+    remember(name, db.version);
     // Never keep a connection that would block another client's upgrade —
     // a blocked upgrade hangs chapter boot behind the loading spinner.
     db.addEventListener('versionchange', function() { try { db.close(); } catch (e) {} });
@@ -41,16 +51,17 @@
   }
 
   function patchedOpen(name, version) {
-    if (name === SAVE_DB && typeof version === 'number' && isFinite(version) && version < storedVersion) {
-      version = storedVersion;
+    var watched = (name in known);
+    if (watched && typeof version === 'number' && isFinite(version) && version < known[name]) {
+      version = known[name];
     }
     var req = nativeOpen.call(this, name, version);
-    if (name === SAVE_DB) {
-      req.addEventListener('success', function() { track(req.result); });
+    if (watched) {
+      req.addEventListener('success', function() { track(name, req.result); });
       req.addEventListener('error', function() {
         var err = req.error;
         if (err && err.name === 'VersionError') {
-          console.warn('[saves] /_savedata is newer than this client expected; reload the page.');
+          console.warn('[saves] ' + name + ' is newer than this client expected; reload the page.');
         }
       });
     }
@@ -64,42 +75,46 @@
     });
   } catch (e) { return; }
 
-  // Make sure FILE_DATA and its timestamp index exist before the runner mounts:
-  // IDBFS enumerates the remote file set through that index, and a store
-  // without it fails every sync with NotFoundError. Only upgrades when
-  // something is actually missing — it never bumps the version for its own sake.
-  (function ensureSchema() {
-    var probe;
-    try { probe = nativeOpen.call(indexedDB, SAVE_DB); } catch (e) { return; }
-    probe.onsuccess = function() {
-      var db = track(probe.result);
-      var needsStore = !db.objectStoreNames.contains(STORE);
-      var needsIndex = false;
-      if (!needsStore) {
-        try {
-          needsIndex = !db.transaction(STORE, 'readonly').objectStore(STORE).indexNames.contains('timestamp');
-        } catch (e) {}
+  // Learn each database's on-disk version before the runner opens it, and make
+  // sure FILE_DATA and its timestamp index exist: IDBFS enumerates the remote
+  // file set through that index, and a store without it fails every sync with
+  // NotFoundError. Only upgrades when something is actually missing — it never
+  // bumps a version for its own sake.
+  function probe(name, onOpen) {
+    var req;
+    try { req = nativeOpen.call(indexedDB, name); } catch (e) { return; }
+    req.onsuccess = function() { onOpen(track(name, req.result)); };
+    req.onerror = function() {};
+  }
+
+  probe(CACHE_DB, function(db) { db.close(); });
+
+  probe(SAVE_DB, function(db) {
+    var needsStore = !db.objectStoreNames.contains(STORE);
+    var needsIndex = false;
+    if (!needsStore) {
+      try {
+        needsIndex = !db.transaction(STORE, 'readonly').objectStore(STORE).indexNames.contains('timestamp');
+      } catch (e) {}
+    }
+    if (!needsStore && !needsIndex && db.version >= BASE_VERSION) { db.close(); return; }
+    var target = Math.max(db.version + 1, BASE_VERSION);
+    db.close();
+    var up;
+    try { up = nativeOpen.call(indexedDB, SAVE_DB, target); } catch (e) { return; }
+    up.onupgradeneeded = function(e) {
+      var idb = e.target.result;
+      var store = idb.objectStoreNames.contains(STORE)
+        ? e.target.transaction.objectStore(STORE)
+        : idb.createObjectStore(STORE);
+      if (!store.indexNames.contains('timestamp')) {
+        store.createIndex('timestamp', 'timestamp', { unique: false });
       }
-      if (!needsStore && !needsIndex && db.version >= BASE_VERSION) { db.close(); return; }
-      var target = Math.max(db.version + 1, BASE_VERSION);
-      db.close();
-      var up;
-      try { up = nativeOpen.call(indexedDB, SAVE_DB, target); } catch (e) { return; }
-      up.onupgradeneeded = function(e) {
-        var idb = e.target.result;
-        var store = idb.objectStoreNames.contains(STORE)
-          ? e.target.transaction.objectStore(STORE)
-          : idb.createObjectStore(STORE);
-        if (!store.indexNames.contains('timestamp')) {
-          store.createIndex('timestamp', 'timestamp', { unique: false });
-        }
-      };
-      up.onsuccess = function() { track(up.result).close(); };
-      up.onerror = function() {};      // the runner's own upgrade path still runs
-      up.onblocked = function() {};    // another tab holds it; that tab repairs it
     };
-    probe.onerror = function() {};
-  })();
+    up.onsuccess = function() { track(SAVE_DB, up.result).close(); };
+    up.onerror = function() {};      // the runner's own upgrade path still runs
+    up.onblocked = function() {};    // another tab holds it; that tab repairs it
+  });
 })();
 
 (function() {

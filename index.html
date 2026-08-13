@@ -445,23 +445,30 @@
       // an orphan. Every key we write must be normalised to /_savedata/<name>.
       const SAVE_DIR = '/_savedata';
 
-      // Returns the full IDBFS path for a save name, or null when the name
-      // cannot be represented. Anything with a path separator, a "." / ".."
-      // segment or a control character is rejected rather than mangled: the old
-      // version was a fixed point for "/_savedata/_savedata/x" and "..", so
-      // brokenReason() called those entries healthy while the game's reconcile
-      // threw on FS.writeFile() and then loaded no saves at all.
+      // Returns the full IDBFS path for a save name or key, or null when it
+      // cannot be represented. Nested paths are legal — the game mounts a whole
+      // directory and its own builds map names like "assets/options.ini" into
+      // it — but "." / ".." segments, empty segments and control characters are
+      // rejected rather than mangled: the old version was a fixed point for
+      // "/_savedata/_savedata/x" and "..", so brokenReason() called those
+      // healthy while the game's reconcile threw on FS.writeFile() and then
+      // loaded none of the saves.
       function normalizeKey(name) {
         var n = String(name == null ? '' : name);
         // Leave the mount directory entry itself alone.
         if (n === SAVE_DIR || n === SAVE_DIR + '/') return n;
         n = n.replace(/^\/+/, '');
         while (n.indexOf('_savedata/') === 0) n = n.slice('_savedata/'.length).replace(/^\/+/, '');
-        if (!isValidSaveName(n)) return null;
-        return SAVE_DIR + '/' + n;
+        n = n.replace(/\/+$/, '');
+        var segments = n.split('/');
+        if (!segments.length) return null;
+        for (var i = 0; i < segments.length; i++) {
+          if (!isValidSaveName(segments[i])) return null;
+        }
+        return SAVE_DIR + '/' + segments.join('/');
       }
 
-      // The basename the game will hand to FS.writeFile.
+      // One path segment: the name the game hands to FS.writeFile / FS.mkdir.
       function isValidSaveName(name) {
         var n = String(name == null ? '' : name);
         if (!n || n !== n.trim()) return false;
@@ -472,11 +479,26 @@
         return true;
       }
 
-      // A key is storable only if it is exactly SAVE_DIR + '/' + a valid name.
+      // A key is storable only if it normalises to itself.
       function isValidSaveKey(key) {
         var k = String(key == null ? '' : key);
         if (k.indexOf(SAVE_DIR + '/') !== 0) return false;
-        return isValidSaveName(k.slice(SAVE_DIR.length + 1));
+        return normalizeKey(k) === k;
+      }
+
+      // "/_savedata/assets/options.ini" -> ["/_savedata/assets"]. IDBFS stores a
+      // directory entry for every folder it syncs, and the reconcile creates
+      // them before the files inside (sorted order), so a nested file whose
+      // parent entry is missing makes FS.writeFile fail with ENOENT.
+      function parentDirKeys(key) {
+        var rel = displayName(key).split('/');
+        var out = [];
+        var acc = SAVE_DIR;
+        for (var i = 0; i < rel.length - 1; i++) {
+          acc += '/' + rel[i];
+          out.push(acc);
+        }
+        return out;
       }
 
       function displayName(key) {
@@ -529,8 +551,10 @@
         return v.contents == null || toBytes(v.contents) !== null;
       }
 
-      // Why the game cannot read this entry, or null when it can.
-      function brokenReason(key, value) {
+      // Why the game cannot read this entry, or null when it can. `keySet`, when
+      // given, is every key in the store, so a nested file can be checked for
+      // the directory entry the reconcile needs.
+      function brokenReason(key, value, keySet) {
         var good = normalizeKey(key);
         if (good === null) return 'stored under a name the game cannot use';
         if (key !== good) return 'stored as "' + key + '" instead of "' + good + '"';
@@ -539,6 +563,12 @@
         if (isDirMode(v.mode)) return null;
         if (typeof v.mode !== 'number' || v.mode <= 0) return 'file mode is missing';
         if (!(v.contents instanceof Uint8Array)) return 'contents are not raw bytes';
+        if (keySet) {
+          var parents = parentDirKeys(key);
+          for (var i = 0; i < parents.length; i++) {
+            if (!keySet[parents[i]]) return 'the folder entry "' + displayName(parents[i]) + '" is missing';
+          }
+        }
         return null;
       }
 
@@ -1376,7 +1406,9 @@
         if (!checkUnsaved()) return;
         var newName = prompt('New filename:', displayName(currentKey));
         if (newName === null) return;
-        var newKey = normalizeKey(newName);
+        // Nested paths are legal in the store but not something to create from
+        // here: the folder entry the game needs would not exist.
+        var newKey = isValidSaveName(newName) ? normalizeKey(newName) : null;
         if (newKey === null) {
           alert('Invalid filename. Use a plain save name with no slashes.');
           return;
@@ -1408,7 +1440,7 @@
       newFileBtn.addEventListener('click', function() {
         var name = prompt('New save filename:');
         if (name === null) return;
-        var newKey = normalizeKey(name);
+        var newKey = isValidSaveName(name) ? normalizeKey(name) : null;
         if (newKey === null) {
           alert('Invalid filename. Use a plain save name with no slashes.');
           return;
@@ -1514,26 +1546,32 @@
         });
       }
 
-      // Plans a launcher JSON bundle (Export All / cloud format).
+      // Plans a launcher JSON bundle. Handles every shape this project has
+      // exported: version 1 with bare names, version 2 with full paths, and the
+      // cloud's hex-encoded (~xx) keys.
       function planBundleImport(text) {
         var data = JSON.parse(text);
         if (!data || !data.files || typeof data.files !== 'object') {
           throw new Error('Invalid save bundle format.');
         }
-        var isEncoded = data.version === 2;
         var planned = [];
         var rejected = [];
         // Decode everything before writing anything: a bad entry used to
         // reject the batch halfway, leaving a half-imported save set.
         Object.keys(data.files).forEach(function(key) {
-          var decodedKey = isEncoded ? decodeKey(key) : key;
-          var fullKey = normalizeKey(decodedKey);
+          var decodedKey = decodeKey(key);      // no-op unless the key is hex-encoded
           var v = data.files[key];
-          if (fullKey === null || !v || typeof v !== 'object') { rejected.push(String(decodedKey)); return; }
+          var label = String(decodedKey || key);
+          if (decodedKey === SAVE_DIR || decodedKey === SAVE_DIR + '/') return;   // the mount itself, not a save
+          var fullKey = normalizeKey(decodedKey);
+          if (fullKey === null || !v || typeof v !== 'object') { rejected.push(label); return; }
+          // Old exports wrote contents:null for entries whose bytes they could
+          // not read. Importing that as a 0-byte file would look like a save.
+          if (v.contents == null) { rejected.push(label + ' (no contents in bundle)'); return; }
           var bytes;
           try {
-            bytes = v.contents == null ? new Uint8Array(0) : fromBase64(v.contents);
-          } catch (err) { rejected.push(displayName(fullKey)); return; }
+            bytes = fromBase64(v.contents);
+          } catch (err) { rejected.push(label + ' (unreadable)'); return; }
           planned.push({ key: fullKey, value: {
             mode: typeof v.mode === 'number' ? v.mode : FILE_MODE,
             timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
@@ -1606,17 +1644,24 @@
 
       function findBrokenEntries() {
         return listAll().then(function(items) {
+          var keySet = {};
+          items.forEach(function(item) { keySet[String(item.key)] = item.value; });
           var broken = [];
           items.forEach(function(item) {
             var key = String(item.key);
             if (key.endsWith('/') || key === SAVE_DIR) return;
-            var reason = brokenReason(key, item.value);
+            var reason = brokenReason(key, item.value, keySet);
             if (reason) {
+              var good = normalizeKey(key);
+              // A nested file only needs its folder entries created — moving or
+              // rewriting it would be the wrong repair.
+              var missingDirs = good === key ? parentDirKeys(key).filter(function(d) { return !keySet[d]; }) : [];
               broken.push({
                 key: key,
-                goodKey: normalizeKey(key),
+                goodKey: good,
                 reason: reason,
                 value: item.value,
+                missingDirs: missingDirs,
                 repairable: isRepairable(item.value)
               });
             }
@@ -1684,7 +1729,18 @@
               return getRawEntry(entry.key).then(function(val) {
                 if (!val) return;
                 if (entry.goodKey === entry.key) {
-                  return putEntry(entry.key, val).then(function() { repaired++; });
+                  // Missing folder entries first: IDBFS creates directories
+                  // before the files inside them, and a file whose folder entry
+                  // is absent makes the whole sync fail with ENOENT.
+                  var dirs = Promise.resolve();
+                  (entry.missingDirs || []).forEach(function(dirKey) {
+                    dirs = dirs.then(function() {
+                      return putEntry(dirKey, { mode: 16877, timestamp: val.timestamp instanceof Date ? val.timestamp : new Date() });
+                    });
+                  });
+                  return dirs.then(function() {
+                    return putEntry(entry.key, val);
+                  }).then(function() { repaired++; });
                 }
                 return getRawEntry(entry.goodKey).then(function(existing) {
                   if (!existing) {
