@@ -2,20 +2,6 @@
 <html lang="en-us">
   <head>
     <script src="speed.js"></script>
-    <base href="https://cdn.jsdelivr.net/gh/technonyte00/deltarune@main/chapter1/">
-    <script>
-      // better debugging for me
-      const ogalert = window.alert;
-      window.alert = function(message) {
-        const baseHref = document.querySelector('base')?.href || '';
-        const idx = baseHref.indexOf('cdn.jsdelivr.net/gh/');
-        let prefix = '';
-        if (idx !== -1) {
-          prefix = baseHref.slice(idx + 'cdn.jsdelivr.net/gh/'.length) + '\n';
-        }
-        ogalert(prefix + message);
-      };
-    </script>
     <meta charset="utf-8" />
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
     <meta name="viewport" content="viewport-fit=cover, width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0" />
@@ -376,17 +362,17 @@
       <div id="messages">
       </div>
     </div>
-	<!-- Ads Stuff for games that need it -->
-   <script async
-     data-ad-client="ca-pub-123"
-     data-ad-frequency-hint="30s"
-     data-adbreak-test="on"
-     src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js">
-   </script>
-
+	<!-- The Google ad script was removed: it was loaded with the placeholder publisher id
+	     "ca-pub-123", so it earned nothing while adding a third-party dependency, tracking
+	     and latency to a self-hosted build. GameMaker's triggerAd() below still calls
+	     adBreak(), which that script used to define, so keep the documented no-op contract
+	     (report the break as not shown) instead of throwing a ReferenceError. -->
    <script>
-     window.adsbygoogle = window.adsbygoogle || [];
-     adConfig = function(o) {adsbygoogle.push(o);}
+     window.adBreak = function (o) {
+       if (o && typeof o.adBreakDone === 'function') {
+         o.adBreakDone({ breakStatus: 'notReady' });
+       }
+     };
    </script>
 
     <script type="text/javascript">
@@ -394,14 +380,6 @@
 	function changecolor(el) {
 		document.body.style.backgroundColor = el.value;
 	}
-	window.addEventListener('message', (event) => {
-    if (event.data.type === 'keydown') {
-        if (typeof handleKeyDown === 'function') handleKeyDown(event.data.key);
-    }
-    if (event.data.type === 'keyup') {
-        if (typeof handleKeyUp === 'function') handleKeyUp(event.data.key);
-    }
-});
 
       const CHANGE_ASPECT_RATIO = true;
 		// Main Page Elements
@@ -433,7 +411,7 @@
         messagesElement.innerHTML = messages;
         messageContainerElement.style.display = 'block';
 
-        if (clearRollbackMessagesTimeoutId === -1) {
+        if (clearRollbackMessagesTimeoutId !== -1) {
           clearTimeout(clearRollbackMessagesTimeoutId);
         }
         clearRollbackMessagesTimeoutId = setTimeout(clearRollbackMessages, 5000);
@@ -1374,11 +1352,15 @@
         }
       });
 
-      window.addEventListener("load", (event) => {
-        if ((!window.oprt || !window.oprt.enterFullscreen) && (!window.chrome || !window.chrome.runtime || !window.chrome.runtime.sendMessage)) {
-          quitButton.hidden = true;
-        }
-      });
+      // Hide the Quit button unless quitIfSupported() has a path that can actually fire:
+      // window.oprt.closeTab (GX Mobile) or the Opera GX extension. The old test looked at
+      // oprt.enterFullscreen, which quitIfSupported() never calls, and chrome.runtime
+      // .sendMessage exists in every Chromium browser, so the pause menu kept offering a
+      // Quit button that did nothing.
+      if (!(window.oprt && window.oprt.closeTab) &&
+          !(/OPR\//.test(navigator.userAgent) && window.chrome && window.chrome.runtime && window.chrome.runtime.sendMessage)) {
+        quitButton.hidden = true;
+      }
 
       setWadLoadCallback(() => {
         enterFullscreenIfSupported();

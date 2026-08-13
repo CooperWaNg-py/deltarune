@@ -38,7 +38,7 @@ canvas {
     <script src="speed.js"></script>
     <meta charset="utf-8" />
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
-    <meta name="viewport" content="viewport-fit=cover, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0" />
+    <meta name="viewport" content="viewport-fit=cover, width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0" />
 	<!-- For Favicons -->
     <link rel="icon" type="x-icon" href="favicon.png">
 	<!-- For Page Title -->
@@ -396,33 +396,54 @@ canvas {
       <div id="messages">
       </div>
     </div>
-	<!-- Ads Stuff for games that need it -->
-   <script async
-     data-ad-client="ca-pub-123"
-     data-ad-frequency-hint="30s"
-     data-adbreak-test="on"
-     src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js">
-   </script>
-
+	<!-- The Google ad script was removed: it was loaded with the placeholder publisher id
+	     "ca-pub-123", so it earned nothing while adding a third-party dependency, tracking
+	     and latency to a self-hosted build. GameMaker's triggerAd() in index.js still calls
+	     adBreak(), which that script used to define, so keep the documented no-op contract
+	     (report the break as not shown) instead of throwing a ReferenceError. -->
    <script>
-     window.adsbygoogle = window.adsbygoogle || [];
-     adConfig = function(o) {adsbygoogle.push(o);}
+     window.adBreak = function (o) {
+       if (o && typeof o.adBreakDone === 'function') {
+         o.adBreakDone({ breakStatus: 'notReady' });
+       }
+     };
    </script>
 
 <script>
   function mergeFiles(fileParts) {
       return new Promise((resolve, reject) => {
-          let buffers = [];
+          let blobParts = [];
 
           function fetchPart(index) {
               if (index >= fileParts.length) {
-                  let mergedBlob = new Blob(buffers);
+                  let mergedBlob = new Blob(blobParts);
                   let mergedFileUrl = URL.createObjectURL(mergedBlob);
+                  // Not revoked here: the runner reaches game.unx through the fetch/XHR
+                  // patches below and nothing tells us when its last read happened, so an
+                  // early revoke would break the load.
                   resolve(mergedFileUrl);
                   return;
               }
-              fetch(fileParts[index]).then((response) => response.arrayBuffer()).then((data) => {
-                  buffers.push(data);
+              // Kept as Blobs rather than ArrayBuffers: holding every part in the JS heap
+              // and then copying the lot into a Blob needed ~2x the file size of RAM and
+              // OOM-crashed low-RAM devices and mobile Safari. Blob parts stay disk-backed.
+              fetch(fileParts[index]).then((response) => {
+                  // fetch() only rejects on network errors, so a 404 part used to be merged
+                  // in as an HTML error page and the game booted with a corrupt game.unx.
+                  if (!response.ok) {
+                      throw new Error("Failed to fetch " + fileParts[index] + " (HTTP " + response.status + ")");
+                  }
+                  // A Blob keeps the part disk-backed instead of in the JS heap. Where the
+                  // browser cannot back a large blob (restricted/at-quota storage) reading
+                  // it fails, so re-fetch that part into memory rather than failing the boot.
+                  return response.blob().catch(() => fetch(fileParts[index]).then((retry) => {
+                      if (!retry.ok) {
+                          throw new Error("Failed to fetch " + fileParts[index] + " (HTTP " + retry.status + ")");
+                      }
+                      return retry.arrayBuffer();
+                  }));
+              }).then((data) => {
+                  blobParts.push(data);
                   fetchPart(index + 1);
               }).catch(reject);
           }
@@ -456,21 +477,34 @@ canvas {
 
       const originalOpen = XMLHttpRequest.prototype.open;
       XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-          if (url.includes("game.unx")) {
-              console.log("XHR:", url);
+          // url may be a URL object, and URL has no .includes - normalise before testing.
+          const href = String(url);
+          if (href.includes("game.unx")) {
+              console.log("XHR:", href);
               url = window.gameUnxUrl;
           }
           return originalOpen.call(this, method, url, ...rest);
       };
       let index = document.createElement("script");
       index.src = "index.js";
+      // Dynamically inserted classic scripts are async by default, so whichever downloaded
+      // first ran first; when runner.js won it replaced the host Module (canvas, setStatus)
+      // with {} and the chapter was a permanent black screen.
+      index.async = false;
       document.body.appendChild(index);
 
       let runner = document.createElement("script");
       runner.src = "runner.js";
+      runner.async = false;
       document.body.appendChild(runner);
   }).catch(error => {
       console.error("Failed to merge files:", error);
+      // Without this the spinner kept spinning and the status still said "Downloading..."
+      // forever, so a failed merge was indistinguishable from a slow one.
+      let spinner = document.getElementById("spinner");
+      let status = document.getElementById("status");
+      if (spinner) spinner.style.display = "none";
+      if (status) status.textContent = "Failed to load game files: " + (error && error.message ? error.message : error);
   });
  
 </script>   

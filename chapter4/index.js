@@ -2,14 +2,6 @@
 	function changecolor(el) {
 		document.body.style.backgroundColor = el.value;
 	}
-	window.addEventListener('message', (event) => {
-    if (event.data.type === 'keydown') {
-        if (typeof handleKeyDown === 'function') handleKeyDown(event.data.key);
-    }
-    if (event.data.type === 'keyup') {
-        if (typeof handleKeyUp === 'function') handleKeyUp(event.data.key);
-    }
-});
 
       const CHANGE_ASPECT_RATIO = true;
 		// Main Page Elements
@@ -41,7 +33,7 @@
         messagesElement.innerHTML = messages;
         messageContainerElement.style.display = 'block';
 
-        if (clearRollbackMessagesTimeoutId === -1) {
+        if (clearRollbackMessagesTimeoutId !== -1) {
           clearTimeout(clearRollbackMessagesTimeoutId);
         }
         clearRollbackMessagesTimeoutId = setTimeout(clearRollbackMessages, 5000);
@@ -1016,11 +1008,16 @@
         }
       });
 
-      window.addEventListener("load", (event) => {
-        if ((!window.oprt || !window.oprt.enterFullscreen) && (!window.chrome || !window.chrome.runtime || !window.chrome.runtime.sendMessage)) {
-          quitButton.hidden = true;
-        }
-      });
+      // Hide the Quit button unless quitIfSupported() has a path that can actually fire:
+      // window.oprt.closeTab (GX Mobile) or the Opera GX extension. This ran from a "load"
+      // listener, but index.js is injected only after the merge, long after load fired, so
+      // it never ran at all. The old test also looked at oprt.enterFullscreen, which
+      // quitIfSupported() never calls, and chrome.runtime.sendMessage exists in every
+      // Chromium browser, so the pause menu kept offering a Quit button that did nothing.
+      if (!(window.oprt && window.oprt.closeTab) &&
+          !(/OPR\//.test(navigator.userAgent) && window.chrome && window.chrome.runtime && window.chrome.runtime.sendMessage)) {
+        quitButton.hidden = true;
+      }
 
       setWadLoadCallback(() => {
         enterFullscreenIfSupported();

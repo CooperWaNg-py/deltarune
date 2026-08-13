@@ -135,10 +135,10 @@
       <div class="modal-footer" id="savesModalFooter">
         <button id="tennaBtn">Tenna Editor</button>
         <button id="exportSavesBtn">Export All</button>
-        <button id="importSavesBtn">Import</button>
-        <input type="file" id="importInput" accept=".json,application/json" hidden>
+        <button id="importSavesBtn" title="Import a saves .json bundle, or DELTARUNE's own save files (filech1_0, dr.ini, keyconfig_0.ini, ...)">Import</button>
+        <input type="file" id="importInput" multiple hidden>
         <button id="clearBackupsBtn">Clear Backups</button>
-        <button id="repairPathsBtn" hidden>Repair save paths</button>
+        <button id="repairPathsBtn" hidden>Repair saves</button>
       </div>
     </div>
   </div>
@@ -164,7 +164,15 @@
       const speedSlider = document.getElementById('speedSlider');
       const speedValue = document.getElementById('speedValue');
       const versionTag = document.getElementById('versionTag');
-      versionTag.textContent = 'v0.2.2 (' + new Date(document.lastModified).toISOString().split('T')[0] + ')';
+      // document.lastModified is local-time and can be unparseable; a RangeError
+      // here used to abort this whole IIFE, leaving every chapter row's inline
+      // onclick="loadChapter(N)" as a ReferenceError.
+      try {
+        var built = new Date(document.lastModified);
+        var stamp = isNaN(built.getTime()) ? '' : ' (' + built.getFullYear() + '-' +
+          ('0' + (built.getMonth() + 1)).slice(-2) + '-' + ('0' + built.getDate()).slice(-2) + ')';
+        versionTag.textContent = 'v0.2.2' + stamp;
+      } catch (e) { versionTag.textContent = 'v0.2.2'; }
 
       function getSpeed() { var v = parseFloat(localStorage.getItem(SPEED_KEY)); return (isFinite(v) && v > 0) ? v : 1; }
       function setSpeed(v) {
@@ -184,7 +192,9 @@
       }
       function closeSettings() { settingsPanel.hidden = true; }
       settingsBtn.addEventListener('click', function(e) {
-        if (settingsPanel.hidden) openSettings();
+        // Toggle: the outside-click handler below excludes the button, so an
+        // open-only handler left no way to close the panel over a running game.
+        if (settingsPanel.hidden) openSettings(); else closeSettings();
       });
       document.addEventListener('click', function(e) {
         if (!settingsPanel.hidden && !settingsBtn.contains(e.target) && !settingsPanel.contains(e.target)) {
@@ -201,8 +211,14 @@
         localStorage.setItem(VOLUME_KEY, String(v));
         volumeSlider.value = v;
         volumeValue.textContent = v + '%';
+        // The slider used to drive the game frame only, so the menu drone and
+        // the menu SFX stayed at 100% however low it was set.
+        var g = v / 100;
+        audio.volume = g;
+        if (typeof menumoveaudio !== 'undefined') menumoveaudio.volume = g;
+        if (typeof menuselectaudio !== 'undefined') menuselectaudio.volume = g;
         if (gamestarted) {
-          try { iframe.contentWindow.postMessage({ type: 'volume', volume: v / 100 }, origin); } catch(e) {}
+          try { iframe.contentWindow.postMessage({ type: 'volume', volume: g }, origin); } catch(e) {}
         }
       }
       volumeSlider.addEventListener('input', function() { setVolume(parseFloat(this.value)); });
@@ -222,12 +238,15 @@
       }
       updateMuteButton();
 
-      // Start menu drone on first user interaction (replaces removed autoplay)
+      // Start menu drone on first user interaction (replaces removed autoplay).
+      // The first click is usually the chapter row itself, and this listener
+      // runs after its onclick has already started the game — so it must not
+      // start the drone under a running chapter.
       var droneStarted = false;
       function startDrone() {
         if (droneStarted) return;
         droneStarted = true;
-        audio.play().catch(function(){});
+        if (!gamestarted) audio.play().catch(function(){});
         document.removeEventListener('click', startDrone);
         document.removeEventListener('keydown', startDrone);
       }
@@ -264,10 +283,17 @@
       }
 
       window.loadChapter = function(chapter) {
-        if (gamestarted) return;
-        if (backTimer) { clearTimeout(backTimer); backTimer = null; }
+        // gamestarted stays true through the 500 ms teardown; a relaunch inside
+        // that window finishes the teardown instead of being swallowed.
+        if (gamestarted && !backTimer) return;
+        if (backTimer) { clearTimeout(backTimer); backTimer = null; gamestarted = false; }
         menuselectaudio.play().catch(function(){});
         gamestarted = true;
+
+        // The first user click is usually the chapter row itself, which also
+        // starts the menu drone — it then looped under the whole chapter with
+        // the mute button hidden and no way to silence it.
+        audio.pause();
 
         menu.classList.add('hidden-menu');
         logo.classList.add('hidden-menu');
@@ -289,11 +315,15 @@
         if (!gamestarted) return;
         iframe.classList.remove('active');
         if (backTimer) clearTimeout(backTimer);
+        // The frame keeps running (and playing) until it is torn down, so the
+        // "is the game running?" flag has to stay true for that whole window —
+        // the save manager uses it to warn about editing under a live game.
+        iframe.onload = null;
         backTimer = setTimeout(function() {
           iframe.src = 'about:blank';
           backTimer = null;
+          gamestarted = false;
         }, 500);
-        gamestarted = false;
         selectedChapter = null;
         rows().forEach(function(r) { r.classList.remove('selected'); });
 
@@ -305,6 +335,7 @@
         backBtn.style.display = 'none';
         versionTag.style.display = 'block';
         updateMuteButton();
+        if (droneStarted && !audio.muted) audio.play().catch(function(){});
 
         var first = rows()[0];
         if (first) first.focus();
@@ -328,23 +359,41 @@
         });
       });
 
+      // Keys the launcher owns while a chapter is running.
+      function handleLauncherKey(key) {
+        if (key === 'Escape') {
+          if (!settingsPanel.hidden) { closeSettings(); return true; }
+          backToMenu();
+          return true;
+        }
+        if (key === '[') { setSpeed(getSpeed() - 0.25); return true; }
+        if (key === ']') { setSpeed(getSpeed() + 0.25); return true; }
+        if (key === '\\') { setSpeed(1); return true; }
+        return false;
+      }
+
+      // Once the game canvas has focus this document stops receiving keys, so
+      // speed.js inside the frame forwards exactly these four up to us. The old
+      // parent→frame {type:'keydown'} forwarding was dead: its receivers called
+      // handleKeyDown/handleKeyUp, which exist nowhere in the build.
+      window.addEventListener('message', function(e) {
+        if (e.origin !== origin || e.source !== iframe.contentWindow) return;
+        if (!e.data || e.data.type !== 'launcher-key') return;
+        if (gamestarted) handleLauncherKey(e.data.key);
+      });
+
       // Keyboard navigation
       document.addEventListener('keydown', function(event) {
+        // Never drive the menu from keystrokes aimed at the save manager: arrow
+        // keys used to yank focus out of the editor onto a chapter row behind
+        // the modal, and Enter then launched that chapter over an open editor.
+        var savesModal = document.getElementById('savesModal');
+        if (savesModal && !savesModal.hidden) return;
+        var t = event.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+
         if (gamestarted) {
-          if (event.key === 'Escape') {
-            if (!settingsPanel.hidden) {
-              closeSettings();
-              event.preventDefault();
-              return;
-            }
-            backToMenu();
-            event.preventDefault();
-            return;
-          }
-          if (event.key === '[') { setSpeed(getSpeed() - 0.25); event.preventDefault(); return; }
-          if (event.key === ']') { setSpeed(getSpeed() + 0.25); event.preventDefault(); return; }
-          if (event.key === '\\') { setSpeed(1); event.preventDefault(); return; }
-          try { iframe.contentWindow.postMessage({ type: 'keydown', key: event.key }, origin); } catch(e) {}
+          if (handleLauncherKey(event.key)) event.preventDefault();
           return;
         }
 
@@ -381,12 +430,6 @@
           }
         }
       });
-
-      document.addEventListener('keyup', function(e) {
-        if (gamestarted) {
-          try { iframe.contentWindow.postMessage({ type: 'keyup', key: e.key }, origin); } catch(e) {}
-        }
-      });
     })();
   </script>
 
@@ -402,17 +445,101 @@
       // an orphan. Every key we write must be normalised to /_savedata/<name>.
       const SAVE_DIR = '/_savedata';
 
+      // Returns the full IDBFS path for a save name, or null when the name
+      // cannot be represented. Anything with a path separator, a "." / ".."
+      // segment or a control character is rejected rather than mangled: the old
+      // version was a fixed point for "/_savedata/_savedata/x" and "..", so
+      // brokenReason() called those entries healthy while the game's reconcile
+      // threw on FS.writeFile() and then loaded no saves at all.
       function normalizeKey(name) {
         var n = String(name == null ? '' : name);
         // Leave the mount directory entry itself alone.
         if (n === SAVE_DIR || n === SAVE_DIR + '/') return n;
-        n = n.replace(/^\/+/, '').replace(/^_savedata\/+/, '');
+        n = n.replace(/^\/+/, '');
+        while (n.indexOf('_savedata/') === 0) n = n.slice('_savedata/'.length).replace(/^\/+/, '');
+        if (!isValidSaveName(n)) return null;
         return SAVE_DIR + '/' + n;
+      }
+
+      // The basename the game will hand to FS.writeFile.
+      function isValidSaveName(name) {
+        var n = String(name == null ? '' : name);
+        if (!n || n !== n.trim()) return false;
+        if (n === '.' || n === '..') return false;
+        if (n.indexOf('/') !== -1 || n.indexOf('\\') !== -1) return false;
+        if (/[\x00-\x1f\x7f]/.test(n)) return false;
+        if (n.length > 128) return false;
+        return true;
+      }
+
+      // A key is storable only if it is exactly SAVE_DIR + '/' + a valid name.
+      function isValidSaveKey(key) {
+        var k = String(key == null ? '' : key);
+        if (k.indexOf(SAVE_DIR + '/') !== 0) return false;
+        return isValidSaveName(k.slice(SAVE_DIR.length + 1));
       }
 
       function displayName(key) {
         var k = String(key == null ? '' : key);
         return k.indexOf(SAVE_DIR + '/') === 0 ? k.slice(SAVE_DIR.length + 1) : k;
+      }
+
+      // S_IFREG | 0666 — the mode IDBFS itself writes for save files.
+      const FILE_MODE = 33206;
+
+      function isDirMode(mode) {
+        return typeof mode === 'number' && (mode & 0xF000) === 0x4000; // S_IFDIR
+      }
+
+      function toBytes(contents) {
+        if (contents instanceof Uint8Array) return contents;
+        if (contents instanceof ArrayBuffer) return new Uint8Array(contents);
+        if (ArrayBuffer.isView(contents)) return new Uint8Array(contents.buffer, contents.byteOffset, contents.byteLength);
+        if (Array.isArray(contents)) return new Uint8Array(contents);
+        if (typeof contents === 'string') return new TextEncoder().encode(contents);
+        return null;
+      }
+
+      // The game's save mount reconciles by calling value.timestamp.getTime(),
+      // switching on value.mode and handing value.contents to FS.writeFile. One
+      // entry with a numeric timestamp, a missing mode or non-byte contents
+      // throws inside that reconcile, which aborts it wholesale — the game then
+      // loads *none* of the saves. Every value we write goes through here.
+      function normalizeValue(value) {
+        var v = value || {};
+        var timestamp = v.timestamp instanceof Date ? v.timestamp : new Date(v.timestamp || Date.now());
+        if (isNaN(timestamp.getTime())) timestamp = new Date();
+        if (isDirMode(v.mode)) return { mode: v.mode, timestamp: timestamp };
+        var bytes = v.contents == null ? new Uint8Array(0) : toBytes(v.contents);
+        // Refuse rather than substitute an empty file: silently blanking an
+        // unconvertible payload (a Blob, a structured-clone object) destroyed
+        // the save the "Repair saves" button was supposed to rescue.
+        if (!bytes) throw new Error('save contents are not raw bytes and cannot be converted');
+        return {
+          contents: bytes,
+          mode: typeof v.mode === 'number' && v.mode > 0 ? v.mode : FILE_MODE,
+          timestamp: timestamp
+        };
+      }
+
+      // Can this entry be repaired in place, or would rewriting it lose data?
+      function isRepairable(value) {
+        var v = value || {};
+        if (isDirMode(v.mode)) return true;
+        return v.contents == null || toBytes(v.contents) !== null;
+      }
+
+      // Why the game cannot read this entry, or null when it can.
+      function brokenReason(key, value) {
+        var good = normalizeKey(key);
+        if (good === null) return 'stored under a name the game cannot use';
+        if (key !== good) return 'stored as "' + key + '" instead of "' + good + '"';
+        var v = value || {};
+        if (!(v.timestamp instanceof Date) || isNaN(v.timestamp.getTime())) return 'timestamp is not a Date';
+        if (isDirMode(v.mode)) return null;
+        if (typeof v.mode !== 'number' || v.mode <= 0) return 'file mode is missing';
+        if (!(v.contents instanceof Uint8Array)) return 'contents are not raw bytes';
+        return null;
       }
 
       if (indexedDB.databases) {
@@ -445,6 +572,7 @@
       let currentValue = null;
       let currentOriginalText = null;
       let isHexMode = false;
+      let currentEncoding = 'utf-8';   // decoder that produced the textarea contents
       let isDirty = false;
       let saveTimer = null;
 
@@ -462,129 +590,200 @@
         return true;
       }
 
+      // Long operations (cloud sync, repair, rename, import) block closing the
+      // modal. A single shared boolean let a fast local op release the lock in
+      // the middle of a cloud write, so this counts instead.
+      var busyCount = 0;
+      function beginBusy() { busyCount++; }
+      function endBusy() { if (busyCount > 0) busyCount--; }
+      function isBusy() { return busyCount > 0; }
+
+      // IDBFS — the mount the game reads its saves through — opens this database
+      // at version 21 and enumerates files through the "timestamp" index. Create
+      // the store the same way, at the same version, so the game never has to run
+      // an upgrade of its own: an upgrade blocks while the launcher holds a
+      // connection, which hangs chapter boot.
+      const IDBFS_VERSION = 21;
+
       function openDB() {
         return new Promise(function(resolve, reject) {
-          // Try without explicit version first to avoid VersionError
+          function locked() {
+            reject(new Error('Database is locked by another tab. Close other tabs and retry.'));
+          }
+          function ready(db) {
+            // Drop the connection the moment another client needs an upgrade,
+            // otherwise the launcher blocks chapter boot.
+            db.onversionchange = function() { try { db.close(); } catch (e) {} };
+            resolve(db);
+          }
+          function upgrade(fromVersion) {
+            var req2 = indexedDB.open(DB_NAME, Math.max(fromVersion + 1, IDBFS_VERSION));
+            req2.onupgradeneeded = function(e2) {
+              var idb = e2.target.result;
+              var store = idb.objectStoreNames.contains(STORE)
+                ? e2.target.transaction.objectStore(STORE)
+                : idb.createObjectStore(STORE);
+              if (!store.indexNames.contains('timestamp')) {
+                store.createIndex('timestamp', 'timestamp', { unique: false });
+              }
+            };
+            req2.onsuccess = function(e2) { ready(e2.target.result); };
+            req2.onerror = function(e2) { reject(e2.target.error); };
+            req2.onblocked = locked;
+          }
+          // Open without a version first: the store usually exists already, and
+          // asking for a lower version than the stored one throws VersionError.
           var req = indexedDB.open(DB_NAME);
           req.onsuccess = function(e) {
             var db = e.target.result;
-            if (!db.objectStoreNames.contains(STORE)) {
-              db.close();
-              // Create the store with a version bump
-              var req2 = indexedDB.open(DB_NAME, db.version + 1);
-              req2.onupgradeneeded = function(e2) {
-                e2.target.result.createObjectStore(STORE);
-              };
-              req2.onsuccess = function(e2) { resolve(e2.target.result); };
-              req2.onerror = function(e2) { reject(e2.target.error); };
-            } else {
-              resolve(db);
-            }
+            if (!db.objectStoreNames.contains(STORE)) { db.close(); upgrade(db.version); return; }
+            // The store can exist without the timestamp index (older builds
+            // created it that way); IDBFS enumerates through that index, so the
+            // game sees nothing until it is there.
+            var hasIndex = true;
+            try {
+              hasIndex = db.transaction(STORE, 'readonly').objectStore(STORE).indexNames.contains('timestamp');
+            } catch (err) {}
+            if (!hasIndex) { db.close(); upgrade(db.version); return; }
+            ready(db);
           };
           req.onerror = function(e) { reject(e.target.error); };
-          req.onblocked = function() { reject(new Error('Database is locked by another tab. Close other tabs and retry.')); };
+          req.onblocked = locked;
+        });
+      }
+
+      // Every helper below opens its own short-lived connection. An aborted
+      // transaction fires no request error, so without these handlers the
+      // promise stayed pending forever and the connection leaked open —
+      // which then blocked the game's upgrade.
+      function withStore(mode, run) {
+        return openDB().then(function(db) {
+          return new Promise(function(resolve, reject) {
+            var tx;
+            try {
+              tx = db.transaction(STORE, mode);
+            } catch (e) { db.close(); reject(e); return; }
+            tx.onabort = tx.onerror = function() { db.close(); reject(tx.error || new Error('Save database transaction aborted.')); };
+            try {
+              run(tx.objectStore(STORE), function(result) { db.close(); resolve(result); }, function(err) { db.close(); reject(err); });
+            } catch (e) { db.close(); reject(e); }
+          });
         });
       }
 
       function listAll() {
-        return openDB().then(function(db) {
-          return new Promise(function(resolve, reject) {
-            const tx = db.transaction(STORE, 'readonly');
-            const items = [];
-            const req = tx.objectStore(STORE).openCursor();
-            req.onsuccess = function(e) {
-              const cursor = e.target.result;
-              if (cursor) {
-                items.push({ key: cursor.primaryKey, value: cursor.value });
-                cursor.continue();
-              } else {
-                db.close();
-                resolve(items);
-              }
-            };
-            req.onerror = function(e) { db.close(); reject(e.target.error); };
-          });
+        return withStore('readonly', function(store, done, fail) {
+          var items = [];
+          var req = store.openCursor();
+          req.onsuccess = function(e) {
+            var cursor = e.target.result;
+            if (cursor) {
+              items.push({ key: cursor.primaryKey, value: cursor.value });
+              cursor.continue();
+            } else {
+              done(items);
+            }
+          };
+          req.onerror = function(e) { fail(e.target.error); };
         });
       }
 
+      // Writes at EXACTLY the key given. It used to re-target through
+      // normalizeKey, so saving from a row whose key was malformed silently
+      // overwrote the healthy save at the normalised path instead. Callers that
+      // hold a bare name call normalizeKey themselves and skip a null result.
       function putEntry(key, value) {
-        key = normalizeKey(key);
+        var normalized;
+        try {
+          if (!isValidSaveKey(key)) {
+            throw new Error('"' + displayName(key) + '" is not a name the game can read.');
+          }
+          normalized = normalizeValue(value);
+        } catch (e) { return Promise.reject(e); }
         delete valueCache[key];
         delete valueCache[key + '.bak'];
-        return openDB().then(function(db) {
-          return new Promise(function(resolve, reject) {
-            const tx = db.transaction(STORE, 'readwrite');
-            const req = tx.objectStore(STORE).put(value, key);
-            req.onsuccess = function() { db.close(); resolve(); };
-            req.onerror = function(e) { db.close(); reject(e.target.error); };
-          });
+        return withStore('readwrite', function(store, done, fail) {
+          var req = store.put(normalized, key);
+          req.onsuccess = function() { done(); };
+          req.onerror = function(e) { fail(e.target.error); };
         });
       }
 
       function deleteEntry(key) {
         delete valueCache[key];
-        return openDB().then(function(db) {
-          return new Promise(function(resolve, reject) {
-            const tx = db.transaction(STORE, 'readwrite');
-            const req = tx.objectStore(STORE).delete(key);
-            req.onsuccess = function() { db.close(); resolve(); };
-            req.onerror = function(e) { db.close(); reject(e.target.error); };
-          });
+        return withStore('readwrite', function(store, done, fail) {
+          var req = store.delete(key);
+          req.onsuccess = function() { done(); };
+          req.onerror = function(e) { fail(e.target.error); };
         });
       }
 
-      // Reads the key exactly as given, without normalisation. Only the path
-      // repair needs this, to fetch a malformed legacy entry verbatim.
+      // Reads the key exactly as given, without normalisation.
       function getRawEntry(key) {
-        return openDB().then(function(db) {
-          return new Promise(function(resolve, reject) {
-            const tx = db.transaction(STORE, 'readonly');
-            const req = tx.objectStore(STORE).get(key);
-            req.onsuccess = function() { db.close(); resolve(req.result || null); };
-            req.onerror = function(e) { db.close(); reject(e.target.error); };
-          });
+        return withStore('readonly', function(store, done, fail) {
+          var req = store.get(key);
+          req.onsuccess = function() { done(req.result || null); };
+          req.onerror = function(e) { fail(e.target.error); };
         });
       }
 
-      function getEntry(key) {
-        return getRawEntry(normalizeKey(key));
-      }
 
       function isDirectory(value) {
-        if (!value || typeof value.mode !== 'number') return false;
-        return (value.mode & 0xF000) === 0x4000; // S_IFDIR
+        return !!value && isDirMode(value.mode);
       }
 
-      function tryDecodeText(bytes) {
+      // Decodes for the editor and reports which decoder won, so the save path
+      // can re-encode with that decoder's exact inverse. Re-encoding a latin-1
+      // decode with TextEncoder doubled every byte >= 0x80, and a UTF-8 decode
+      // that contained U+FFFD replaced the original bytes for good.
+      function decodeForEditor(bytes) {
         if (!bytes) return null;
         if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
         if (!(bytes instanceof Uint8Array)) return null;
-        if (bytes.length === 0) return '';
+        if (bytes.length === 0) return { text: '', encoding: 'utf-8' };
         try {
-          const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-          if (text.length === 0) return null;
-          var bad = 0;
-          for (var i = 0; i < text.length; i++) {
-            var code = text.charCodeAt(i);
-            if (code === 0xFFFD) bad++;
-            else if (code < 8) bad++;
-            else if (code > 13 && code < 32) bad++;
+          var text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+          if (text.length && text.indexOf('\uFFFD') === -1 && !hasControlChars(text)) {
+            // Only trust UTF-8 when it round-trips byte for byte.
+            var back = new TextEncoder().encode(text);
+            if (back.length === bytes.length) {
+              var same = true;
+              for (var i = 0; i < bytes.length; i++) { if (back[i] !== bytes[i]) { same = false; break; } }
+              if (same) return { text: text, encoding: 'utf-8' };
+            }
           }
-          if (bad / text.length <= 0.05) return text;
-          // fallback: decode as latin-1 (accepts any byte)
+          // latin-1 accepts any byte and is exactly invertible.
           var fallback = '';
-          for (var i = 0; i < bytes.length; i++) fallback += String.fromCharCode(bytes[i]);
-          bad = 0;
-          for (var i = 0; i < fallback.length; i++) {
-            var code = fallback.charCodeAt(i);
-            if (code < 8) bad++;
-            else if (code > 13 && code < 32) bad++;
-          }
-          if (bad / fallback.length > 0.05) return null;
-          return fallback;
+          for (var j = 0; j < bytes.length; j++) fallback += String.fromCharCode(bytes[j]);
+          if (hasControlChars(fallback)) return null;
+          return { text: fallback, encoding: 'latin-1' };
         } catch (e) {
           return null;
         }
+      }
+
+      function hasControlChars(text) {
+        var bad = 0;
+        for (var i = 0; i < text.length; i++) {
+          var code = text.charCodeAt(i);
+          if (code < 8 || (code > 13 && code < 32)) bad++;
+        }
+        return bad / text.length > 0.05;
+      }
+
+      // Inverse of decodeForEditor. latin-1 rejects anything above U+00FF so a
+      // pasted non-latin character fails loudly instead of corrupting the file.
+      function encodeFromEditor(text, encoding) {
+        if (encoding !== 'latin-1') return new TextEncoder().encode(text);
+        var out = new Uint8Array(text.length);
+        for (var i = 0; i < text.length; i++) {
+          var code = text.charCodeAt(i);
+          if (code > 0xFF) {
+            throw new Error('This save is binary; "' + text.charAt(i) + '" cannot be stored. Switch to hex editing.');
+          }
+          out[i] = code;
+        }
+        return out;
       }
 
       function toHexInline(bytes) {
@@ -618,12 +817,16 @@
       }
 
       function saveSingleFile(key, value) {
-        if (!value || !value.contents) { alert('Empty file.'); return; }
+        var bytes = toBytes(value && value.contents);
+        // The Blob constructor stringifies anything that is not a BufferSource,
+        // so an unreadable entry used to "export" as the text "[object Object]".
+        if (!bytes) { alert('This entry\'s contents are not raw bytes — run "Repair saves" first.'); return; }
         // Export under the bare save name ("filech4_1"), not the mangled full
         // path ("savedata_filech4_1"), so re-importing the file reproduces the
-        // original key instead of creating a bogus one.
-        var name = displayName(key).replace(/[\\\/:*?"<>|]/g, '_').replace(/^_+/, '') || 'save';
-        var blob = new Blob([value.contents], { type: 'application/octet-stream' });
+        // original key instead of creating a bogus one. Leading underscores are
+        // part of the name (displayName already stripped the path).
+        var name = displayName(key).replace(/[\\\/:*?"<>|]/g, '_') || 'save';
+        var blob = new Blob([bytes], { type: 'application/octet-stream' });
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
         a.href = url;
@@ -634,18 +837,8 @@
         setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
       }
 
-      function listKeys() {
-        return openDB().then(function(db) {
-          return new Promise(function(resolve, reject) {
-            var tx = db.transaction(STORE, 'readonly');
-            var req = tx.objectStore(STORE).getAllKeys();
-            req.onsuccess = function() { db.close(); resolve(req.result); };
-            req.onerror = function(e) { db.close(); reject(e.target.error); };
-          });
-        });
-      }
-
       var valueCache = {};
+      var renderToken = 0;   // guards the async size pass against a newer render
 
       function sortKeys(a, b) {
         if (sortBy === 'name') return a.localeCompare(b);
@@ -668,14 +861,13 @@
           var nameSpan = document.createElement('div');
           nameSpan.className = 'save-name';
           highlightText(nameSpan, displayName(key), filter);
-          if (key !== normalizeKey(key)) {
-            // Legacy entry written without the /_savedata/ prefix: the game
-            // cannot see it and syncfs will drop it.
+          if (brokenKeys[key]) {
+            // Either the key is not the full IDBFS path or the value is shaped
+            // so the game's reconcile throws on it; both hide the save.
             var badTag = document.createElement('span');
             badTag.className = 'save-chapter-tag';
             badTag.textContent = 'not visible to game';
-            badTag.title = 'Stored as "' + key + '" instead of "' + normalizeKey(key) +
-              '". Use "Repair save paths" to fix it.';
+            badTag.title = brokenKeys[key] + '. Use "Repair saves" to fix it.';
             nameSpan.appendChild(badTag);
           }
           if (tag) {
@@ -722,22 +914,29 @@
           });
           savesList.appendChild(div);
         });
-        // async load sizes and cache values
+        // Async size pass. It is tagged with the render it belongs to: a
+        // superseded pass used to write sizes into whatever rows the newer
+        // render had put in those DOM positions.
+        var token = ++renderToken;
         openDB().then(function(db) {
+          if (token !== renderToken) { db.close(); return; }
           var tx = db.transaction(STORE, 'readonly');
           var req = tx.objectStore(STORE).openCursor();
+          var els = savesList.querySelectorAll('.save-item');
+          tx.onabort = tx.onerror = function() { db.close(); };
           req.onsuccess = function(e) {
+            if (token !== renderToken) { db.close(); return; }
             var cursor = e.target.result;
             if (cursor) {
               var k = cursor.primaryKey;
               var v = cursor.value;
-              if (v && v.contents && !k.endsWith('/')) {
+              if (v && !k.endsWith('/')) {
                 valueCache[k] = v;
                 var idx = keyList.indexOf(k);
-                if (idx !== -1) {
-                  var els = savesList.querySelectorAll('.save-item');
-                  var sizeEl = els[idx] && els[idx].querySelector('.save-size-placeholder');
-                  if (sizeEl) sizeEl.textContent = formatSize(v.contents.byteLength || v.contents.length || 0);
+                var bytes = toBytes(v.contents);
+                if (idx !== -1 && els[idx]) {
+                  var sizeEl = els[idx].querySelector('.save-size-placeholder');
+                  if (sizeEl) sizeEl.textContent = bytes ? formatSize(bytes.length) : 'unreadable';
                 }
               }
               cursor.continue();
@@ -746,12 +945,15 @@
             }
           };
           req.onerror = function() { db.close(); };
-        });
+        }).catch(function() {});
       }
 
+      // Rows are rendered from raw store keys, so values must be read by the
+      // same raw key. Reading through the normalising getEntry showed (and let
+      // you overwrite) a different record than the row you clicked.
       function loadValue(key) {
         if (valueCache[key]) return Promise.resolve(valueCache[key]);
-        return getEntry(key).then(function(v) { if (v) valueCache[key] = v; return v; });
+        return getRawEntry(key).then(function(v) { if (v) valueCache[key] = v; return v; });
       }
 
       function refreshList() {
@@ -759,9 +961,10 @@
         hexPreview.hidden = true;
         savesList.hidden = false;
         savesList.innerHTML = '<div class="saves-empty">Loading...</div>';
+        var chain;
         if (sortBy === 'size' || sortBy === 'date') {
           // load full data first for comparison
-          return listAll().then(function(items) {
+          chain = listAll().then(function(items) {
             valueCache = {};
             var allFiles = items.filter(function(it) { return !isDirectory(it.value); });
             if (allFiles.length === 0) {
@@ -779,9 +982,9 @@
             }
             filtered.sort(function(a, b) {
               if (sortBy === 'size') {
-                var sa = a.value && a.value.contents ? (a.value.contents.byteLength || a.value.contents.length || 0) : 0;
-                var sb = b.value && b.value.contents ? (b.value.contents.byteLength || b.value.contents.length || 0) : 0;
-                return sb - sa;
+                var ba = toBytes(a.value && a.value.contents);
+                var bb = toBytes(b.value && b.value.contents);
+                return (bb ? bb.length : 0) - (ba ? ba.length : 0);
               }
               if (sortBy === 'date') {
                 var da = a.value && a.value.timestamp ? new Date(a.value.timestamp).getTime() : 0;
@@ -795,29 +998,48 @@
             savesCount.textContent = keys.length + ' / ' + allFiles.length + ' files';
             renderAndLoad(keys, filter);
           });
+        } else {
+          // Directories are stored WITHOUT a trailing slash and identified by
+          // their mode, so this branch needs the values too — otherwise the
+          // mount's subdirectories rendered as clickable, deletable "saves".
+          chain = listAll().then(function(items) {
+            var filter = savesSearch.value.toLowerCase().trim();
+            var files = items.filter(function(it) {
+              return !isDirectory(it.value) && !String(it.key).endsWith('/') && it.key !== SAVE_DIR;
+            });
+            files.forEach(function(f) { valueCache[f.key] = f.value; });
+            if (files.length === 0) {
+              savesList.innerHTML = '<div class="saves-empty">No save files found.<br><span class="saves-hint">Launch a chapter and create a save first.</span></div>';
+              savesCount.textContent = '';
+              return;
+            }
+            var keys = files.map(function(f) { return String(f.key); });
+            var filtered = filter ? keys.filter(function(k) { return k.toLowerCase().indexOf(filter) !== -1; }) : keys;
+            savesCount.textContent = filtered.length + ' / ' + keys.length + ' files';
+            if (filtered.length === 0) {
+              savesList.innerHTML = '<div class="saves-empty">No files match filter.</div>';
+              return;
+            }
+            filtered.sort(sortKeys);
+            renderAndLoad(filtered, filter);
+          });
         }
-        return listKeys().then(function(keys) {
-          var filter = savesSearch.value.toLowerCase().trim();
-          var items = keys.filter(function(k) { return !k.endsWith('/'); });
-          if (items.length === 0) {
-            savesList.innerHTML = '<div class="saves-empty">No save files found.<br><span class="saves-hint">Launch a chapter and create a save first.</span></div>';
-            savesCount.textContent = '';
-            return;
-          }
-          var filtered = items;
-          if (filter) {
-            filtered = items.filter(function(k) { return k.toLowerCase().indexOf(filter) !== -1; });
-          }
-          savesCount.textContent = filtered.length + ' / ' + items.length + ' files';
-          if (filtered.length === 0) {
-            savesList.innerHTML = '<div class="saves-empty">No files match filter.</div>';
-            return;
-          }
-          filtered.sort(sortKeys);
-          renderAndLoad(filtered, filter);
-        }).catch(function(err) {
-          savesList.innerHTML = '<div class="saves-empty">Error loading saves:<br>' + (err && err.message ? err.message : err) + '</div>';
+        // One error handler for BOTH branches: the size/date branch used to
+        // return early and leave the modal stuck on "Loading..." forever.
+        return chain.catch(function(err) {
+          savesList.innerHTML = '';
+          var msg = document.createElement('div');
+          msg.className = 'saves-empty';
+          msg.textContent = 'Error loading saves: ' + (err && err.message ? err.message : err);
+          savesList.appendChild(msg);
         });
+      }
+
+      // Re-scan for unreadable entries and then repaint: every mutation has to
+      // go through here or the "not visible to game" tags and the repair count
+      // keep describing the previous state.
+      function refreshListAndFlags() {
+        return updateRepairButton().then(refreshList);
       }
 
       function highlightText(container, text, query) {
@@ -857,16 +1079,21 @@
       });
 
       function getChapterTag(key) {
-        var m = key.match(/filech(\d)/);
+        var name = displayName(key);
+        var m = name.match(/filech([1-5])/);
         if (m) return 'Ch. ' + m[1];
-        for (var n = 1; n <= 7; n++) {
-          if (key.indexOf('ch' + n) !== -1 || key.indexOf('chapter' + n) !== -1) return 'Ch. ' + n;
-        }
-        return '';
+        // Anchored: an unanchored indexOf('ch1') tagged "search1" as Chapter 1
+        // and then sorted it under that chapter.
+        m = name.match(/(?:^|[^a-z])ch(?:apter)?([1-5])(?![0-9])/i);
+        return m ? 'Ch. ' + m[1] : '';
       }
 
       function fromHex(hex) {
-        hex = hex.replace(/[^0-9a-fA-F]/g, '');
+        var cleaned = hex.replace(/\s+/g, '');
+        // Silently dropping stray characters shifted every following byte by a
+        // nibble and wrote a corrupted save with no warning.
+        if (/[^0-9a-fA-F]/.test(cleaned)) throw new Error('Hex contains characters that are not 0-9 or a-f.');
+        hex = cleaned;
         if (hex.length % 2) throw new Error('Hex string has an odd number of digits (' + hex.length + ').');
         var bytes = new Uint8Array(hex.length / 2);
         for (var i = 0; i < bytes.length; i++) {
@@ -890,7 +1117,10 @@
           var c = bytes[i];
           ascii += (c >= 32 && c <= 126) ? String.fromCharCode(c) : '.';
         }
-        var pad = 16 - (bytes.length % 16 || 16);
+        // Padding has to follow the rows actually printed, not the file size,
+        // or the ASCII column of a >256-byte preview is misaligned.
+        var shown = Math.min(256, bytes.length);
+        var pad = 16 - (shown % 16 || 16);
         for (var j = 0; j < pad; j++) out += '   ';
         out += '  ' + ascii;
         if (bytes.length > 256) out += '\n... (' + bytes.length + ' bytes total)';
@@ -900,6 +1130,7 @@
       function openEditor(key, value) {
         currentKey = key;
         currentValue = value;
+        currentEncoding = 'utf-8';
         editorFilename.textContent = displayName(key);
         editorFilename.title = key;
         hexPreview.hidden = true;
@@ -907,34 +1138,38 @@
         editorGoOriginal.hidden = true;
         if (key.endsWith('.bak')) {
           var origKey = key.slice(0, -4);
-          getEntry(origKey).then(function(origVal) {
+          getRawEntry(origKey).then(function(origVal) {
             editorGoOriginal.hidden = !origVal;
           }).catch(function() {});
         } else {
-          getEntry(key + '.bak').then(function(bakVal) {
+          getRawEntry(key + '.bak').then(function(bakVal) {
             editorRestoreBackup.hidden = !bakVal;
           }).catch(function() {});
         }
         try {
-          var bytes = value && value.contents;
-          if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
-          if (!bytes || !bytes.length) {
-            editorTextarea.value = '[File is empty or has no data]';
+          var bytes = toBytes(value && value.contents);
+          if (!bytes) {
+            editorTextarea.value = '[Contents are not raw bytes — use "Repair saves" first]';
             editorTextarea.readOnly = true;
             editorSave.disabled = true;
             isHexMode = false;
+          } else if (!bytes.length) {
+            // An empty file is still editable: this is how a new save is filled in.
+            editorTextarea.value = '';
+            editorTextarea.readOnly = false;
+            editorSave.disabled = false;
+            isHexMode = false;
           } else {
-            const text = tryDecodeText(bytes);
-            if (text === null) {
+            var decoded = decodeForEditor(bytes);
+            if (decoded === null) {
               isHexMode = true;
               editorTextarea.value = toHexInline(bytes);
               hexPreview.textContent = formatHexPreview(bytes);
               hexPreview.hidden = false;
-              editorTextarea.readOnly = false;
-              editorSave.disabled = false;
             } else {
               isHexMode = false;
-              editorTextarea.value = text;
+              currentEncoding = decoded.encoding;
+              editorTextarea.value = decoded.text;
             }
             editorTextarea.readOnly = false;
             editorSave.disabled = false;
@@ -954,10 +1189,9 @@
         try {
           var draft = sessionStorage.getItem('deltarune_draft_' + key);
           if (draft && draft !== editorTextarea.value) {
-            if (confirm('Restore unsaved changes from last session for "' + key + '"?')) {
+            if (confirm('Restore unsaved changes from last session for "' + displayName(key) + '"?')) {
               editorTextarea.value = draft;
               isDirty = true;
-              currentOriginalText = draft;
             } else {
               sessionStorage.removeItem('deltarune_draft_' + key);
             }
@@ -965,65 +1199,113 @@
         } catch(e) {}
       }
 
+      function clearDraft(key) {
+        if (!key) return;
+        try { sessionStorage.removeItem('deltarune_draft_' + key); } catch (e) {}
+      }
+
+      function leaveEditor() {
+        if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
+        // A discarded edit must not come back the next time this file (or a new
+        // file reusing its name) is opened.
+        if (isDirty) clearDraft(currentKey);
+        isDirty = false;
+      }
+
       var draftTimer = null;
       editorTextarea.addEventListener('input', function() {
-        markDirty();
+        // "Dirty" used to mean "a key was pressed", so a no-op edit still
+        // overwrote the only pristine backup on save.
+        isDirty = editorTextarea.value !== currentOriginalText;
         if (draftTimer) clearTimeout(draftTimer);
         draftTimer = setTimeout(function() {
-          if (currentKey) {
+          if (currentKey && isDirty) {
             try { sessionStorage.setItem('deltarune_draft_' + currentKey, editorTextarea.value); } catch(e) {}
           }
         }, 500);
       });
 
       editorBack.addEventListener('click', function() {
-        if (checkUnsaved()) refreshList();
+        if (checkUnsaved()) { leaveEditor(); refreshList(); }
       });
+
+      function sameBytes(a, b) {
+        if (!a || !b || a.length !== b.length) return false;
+        for (var i = 0; i < a.length; i++) { if (a[i] !== b[i]) return false; }
+        return true;
+      }
 
       editorSave.addEventListener('click', function() {
         if (!currentKey || !currentValue) return;
+        var newBytes;
         try {
-          var newBytes;
-          if (isHexMode) {
-            newBytes = fromHex(editorTextarea.value);
-          } else {
-            newBytes = new TextEncoder().encode(editorTextarea.value);
+          newBytes = isHexMode ? fromHex(editorTextarea.value)
+                               : encodeFromEditor(editorTextarea.value, currentEncoding);
+        } catch (e) {
+          alert('Error encoding text: ' + e.message);
+          return;
+        }
+        var savedKey = currentKey;
+        var openedBytes = toBytes(currentValue.contents);
+        beginBusy();
+        // Re-read first: the running game, a cloud restore or the Tenna editor
+        // can have rewritten this file since it was opened, and blindly saving
+        // destroyed that newer copy (the backup kept the stale bytes too).
+        getRawEntry(savedKey).then(function(onDisk) {
+          var current = onDisk ? toBytes(onDisk.contents) : null;
+          if (onDisk && openedBytes && !sameBytes(current, openedBytes)) {
+            if (!confirm('"' + displayName(savedKey) + '" changed on disk since you opened it ' +
+                '(the game or a sync wrote to it).\n\nOverwrite it with your edit?')) {
+              return null;
+            }
           }
           var newValue = {
             contents: newBytes,
-            mode: currentValue.mode || 33206,
+            mode: (onDisk && onDisk.mode) || currentValue.mode || FILE_MODE,
             timestamp: new Date()
           };
-          // auto-backup only when content actually changed
-          var doBackup = isDirty;
-          var bakPromise = Promise.resolve();
-          if (doBackup) {
-            var bakKey = currentKey + '.bak';
-            var bakValue = { contents: currentValue.contents, mode: currentValue.mode, timestamp: new Date() };
-            bakPromise = putEntry(bakKey, bakValue);
-          }
-          bakPromise.then(function() {
-            return putEntry(currentKey, newValue);
+          var bakKey = savedKey + '.bak';
+          var backupSource = onDisk || currentValue;
+          // Keep the FIRST backup: overwriting it on every save meant two edits
+          // were enough to lose the original for good.
+          return getRawEntry(bakKey).then(function(existingBak) {
+            if (existingBak || savedKey.endsWith('.bak') || !isRepairable(backupSource)) return null;
+            return putEntry(bakKey, {
+              contents: backupSource.contents,
+              mode: backupSource.mode,
+              timestamp: backupSource.timestamp
+            }).catch(function() { /* a failed backup must not block the save */ });
           }).then(function() {
-            editorSave.textContent = 'Saved!';
-            setTimeout(function() { editorSave.textContent = 'Save Changes'; }, 1500);
-            currentValue = newValue;
-            isDirty = false;
-            currentOriginalText = editorTextarea.value;
-            try { sessionStorage.removeItem('deltarune_draft_' + currentKey); } catch(e) {}
-          }).catch(function(err) {
-            alert('Error saving: ' + (err && err.message ? err.message : err));
-          });
-        } catch (e) {
-          alert('Error encoding text: ' + e.message);
-        }
+            return putEntry(savedKey, newValue);
+          }).then(function() { return newValue; });
+        }).then(function(newValue) {
+          if (!newValue) return;
+          editorSave.textContent = 'Saved!';
+          setTimeout(function() { editorSave.textContent = 'Save Changes'; }, 1500);
+          currentValue = newValue;
+          isDirty = false;
+          currentOriginalText = editorTextarea.value;
+          clearDraft(savedKey);
+          invalidateCache();
+          // The preview pane showed the pre-edit bytes until the file was reopened.
+          if (isHexMode) hexPreview.textContent = formatHexPreview(newValue.contents);
+        }).catch(function(err) {
+          alert('Error saving: ' + (err && err.message ? err.message : err));
+        }).then(function() { endBusy(); });
       });
 
       editorDelete.addEventListener('click', function() {
         if (!currentKey) return;
         if (!checkUnsaved()) return;
-        if (!confirm('Delete "' + currentKey + '"?\nThis cannot be undone.')) return;
-        deleteEntry(currentKey).then(refreshList).catch(function(err) {
+        if (!confirm('Delete "' + displayName(currentKey) + '"?\nThis cannot be undone.')) return;
+        var doomed = currentKey;
+        deleteEntry(doomed).then(function() {
+          // Otherwise the deleted file's draft is offered to the next file
+          // created with the same name.
+          clearDraft(doomed);
+          leaveEditor();
+          return refreshListAndFlags();
+        }).catch(function(err) {
           alert('Error deleting: ' + (err && err.message ? err.message : err));
         });
       });
@@ -1031,40 +1313,58 @@
       editorRestoreBackup.addEventListener('click', function() {
         if (!currentKey || currentKey.endsWith('.bak')) return;
         if (!checkUnsaved()) return;
-        var bakKey = currentKey + '.bak';
-        getEntry(bakKey).then(function(bakValue) {
+        var target = currentKey;
+        var bakKey = target + '.bak';
+        beginBusy();
+        getRawEntry(bakKey).then(function(bakValue) {
           if (!bakValue) {
             editorRestoreBackup.hidden = true;
             if (window.__launcher && window.__launcher.toast) window.__launcher.toast('No backup found for this file.');
             else alert('No backup found for this file.');
             return;
           }
-          var newValue = {
-            contents: bakValue.contents,
-            mode: bakValue.mode || currentValue.mode || 33206,
-            timestamp: new Date()
-          };
-          return putEntry(currentKey, newValue).then(function() {
-            invalidateCache();
-            openEditor(currentKey, newValue);
-            if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Restored from backup.');
+          // Swap, don't overwrite: restoring used to throw away the current
+          // contents with no copy left anywhere.
+          return getRawEntry(target).then(function(currentOnDisk) {
+            var swap = Promise.resolve();
+            if (currentOnDisk && isRepairable(currentOnDisk)) {
+              swap = putEntry(bakKey, {
+                contents: currentOnDisk.contents,
+                mode: currentOnDisk.mode,
+                timestamp: currentOnDisk.timestamp
+              });
+            }
+            var newValue = {
+              contents: bakValue.contents,
+              mode: bakValue.mode || (currentValue && currentValue.mode) || FILE_MODE,
+              timestamp: new Date()
+            };
+            return swap.then(function() {
+              return putEntry(target, newValue);
+            }).then(function() {
+              invalidateCache();
+              clearDraft(target);
+              openEditor(target, newValue);
+              if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Restored from backup (previous contents kept as .bak).');
+            });
           });
         }).catch(function(err) {
           alert('Error restoring from backup: ' + (err && err.message ? err.message : err));
-        });
+        }).then(function() { endBusy(); });
       });
 
       editorGoOriginal.addEventListener('click', function() {
         if (!currentKey || !currentKey.endsWith('.bak')) return;
         if (!checkUnsaved()) return;
         var origKey = currentKey.slice(0, -4);
-        getEntry(origKey).then(function(origValue) {
+        getRawEntry(origKey).then(function(origValue) {
           if (!origValue) {
             editorGoOriginal.hidden = true;
             if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Original file not found.');
             else alert('Original file not found.');
             return;
           }
+          leaveEditor();
           openEditor(origKey, origValue);
         }).catch(function(err) {
           alert('Error opening original: ' + (err && err.message ? err.message : err));
@@ -1075,65 +1375,87 @@
         if (!currentKey) return;
         if (!checkUnsaved()) return;
         var newName = prompt('New filename:', displayName(currentKey));
-        if (!newName) return;
+        if (newName === null) return;
         var newKey = normalizeKey(newName);
-        if (newKey === currentKey) return;
-        if (newName.indexOf('/') !== -1 || newName.indexOf('..') !== -1) {
-          alert('Invalid filename.');
+        if (newKey === null) {
+          alert('Invalid filename. Use a plain save name with no slashes.');
           return;
         }
-        cloudBusy = true;
-        getEntry(currentKey).then(function(val) {
-          if (!val) throw new Error('File not found: ' + currentKey);
+        if (newKey === currentKey) return;
+        var oldKey = currentKey;
+        beginBusy();
+        // Renaming onto an existing name used to overwrite that save and then
+        // delete the source, destroying the destination's only copy.
+        getRawEntry(newKey).then(function(clash) {
+          if (clash) {
+            throw new Error('"' + displayName(newKey) + '" already exists. Pick another name.');
+          }
+          return getRawEntry(oldKey);
+        }).then(function(val) {
+          if (!val) throw new Error('File not found: ' + displayName(oldKey));
           return putEntry(newKey, val).then(function() {
-            return deleteEntry(currentKey);
+            return deleteEntry(oldKey);
           }).then(function() {
             invalidateCache();
-            return openEditor(newKey, val);
+            clearDraft(oldKey);
+            openEditor(newKey, val);
           });
         }).catch(function(err) {
           alert('Error renaming: ' + (err && err.message ? err.message : err));
-        }).then(function() {
-          cloudBusy = false;
-        });
+        }).then(function() { endBusy(); });
       });
 
       newFileBtn.addEventListener('click', function() {
         var name = prompt('New save filename:');
-        if (!name) return;
-        if (name.indexOf('/') !== -1 || name.indexOf('..') !== -1) {
-          alert('Invalid filename.');
+        if (name === null) return;
+        var newKey = normalizeKey(name);
+        if (newKey === null) {
+          alert('Invalid filename. Use a plain save name with no slashes.');
           return;
         }
-        var newKey = normalizeKey(name);
-        var emptyVal = { contents: new Uint8Array(0), mode: 33206, timestamp: new Date() };
-        cloudBusy = true;
-        putEntry(newKey, emptyVal).then(function() {
-          invalidateCache();
-          return refreshList();
+        var emptyVal = { contents: new Uint8Array(0), mode: FILE_MODE, timestamp: new Date() };
+        beginBusy();
+        // "New File" is an upsert: without this check, typing the name of an
+        // existing save replaced it with an empty file, silently and with no
+        // backup.
+        getRawEntry(newKey).then(function(existing) {
+          if (existing) {
+            throw new Error('"' + displayName(newKey) + '" already exists. Open it from the list, or pick another name.');
+          }
+          return putEntry(newKey, emptyVal);
         }).then(function() {
-          return openEditor(newKey, emptyVal);
+          invalidateCache();
+          return refreshListAndFlags();
+        }).then(function() {
+          openEditor(newKey, emptyVal);
         }).catch(function(err) {
           alert('Error creating file: ' + (err && err.message ? err.message : err));
-        }).then(function() {
-          cloudBusy = false;
-        });
+        }).then(function() { endBusy(); });
       });
 
       exportBtn.addEventListener('click', function() {
         listAll().then(function(items) {
           if (items.length === 0) { if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Nothing to export.'); else alert('Nothing to export.'); return; }
           const out = { version: 2, db: DB_NAME, exportedAt: new Date().toISOString(), files: {} };
+          var unreadable = [];
           items.forEach(function(item) {
             const v = item.value || {};
-            var contents = v.contents;
-            if (contents instanceof ArrayBuffer) contents = new Uint8Array(contents);
+            if (isDirectory(v)) return;
+            // Anything that is not convertible used to be exported as
+            // contents:null and imported back as a 0-byte file — a backup that
+            // silently wiped the save.
+            var contents = toBytes(v.contents);
+            if (!contents) { unreadable.push(displayName(item.key)); return; }
             out.files[item.key] = {
-              mode: v.mode,
-              timestamp: v.timestamp instanceof Date ? v.timestamp.toISOString() : v.timestamp,
-              contents: contents instanceof Uint8Array ? toBase64(contents) : null
+              mode: typeof v.mode === 'number' ? v.mode : FILE_MODE,
+              timestamp: v.timestamp instanceof Date ? v.timestamp.toISOString() : new Date(v.timestamp || Date.now()).toISOString(),
+              contents: toBase64(contents)
             };
           });
+          if (!Object.keys(out.files).length) {
+            alert('Nothing could be exported: every entry has unreadable contents. Run "Repair saves" first.');
+            return;
+          }
           const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
@@ -1143,6 +1465,10 @@
           a.click();
           document.body.removeChild(a);
           setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+          if (unreadable.length) {
+            alert('Exported ' + Object.keys(out.files).length + ' file(s).\n\nSKIPPED (unreadable contents, run "Repair saves"):\n  ' +
+              unreadable.slice(0, 10).join('\n  ') + (unreadable.length > 10 ? '\n  ...' : ''));
+          }
         }).catch(function(err) {
           alert('Export failed: ' + (err && err.message ? err.message : err));
         });
@@ -1150,179 +1476,356 @@
 
       importBtn.addEventListener('click', function() { importInput.click(); });
 
+      var MAX_IMPORT_BYTES = 8 * 1024 * 1024;
+
+      // Replaces an entry but keeps the first pristine copy as <key>.bak, so an
+      // import can never be the thing that loses a save.
+      function putWithBackup(key, value) {
+        return getRawEntry(key).then(function(existing) {
+          if (!existing || key.endsWith('.bak') || !isRepairable(existing)) return null;
+          return getRawEntry(key + '.bak').then(function(bak) {
+            if (bak) return null;
+            return putEntry(key + '.bak', existing).catch(function() {});
+          });
+        }).then(function() {
+          return putEntry(key, value);
+        });
+      }
+
+      function runImport(planned, rejected) {
+        if (!planned.length) throw new Error('Nothing importable was selected.');
+        var written = 0;
+        var failed = [];
+        var chain = Promise.resolve();
+        planned.forEach(function(p) {
+          chain = chain.then(function() {
+            return putWithBackup(p.key, p.value).then(function() { written++; })
+              .catch(function() { failed.push(displayName(p.key)); });
+          });
+        });
+        return chain.then(function() {
+          var msg = 'Imported ' + written + ' file(s).' +
+            (rejected.length ? ' Skipped ' + rejected.length + ': ' + rejected.slice(0, 3).join(', ') + (rejected.length > 3 ? '…' : '') + '.' : '') +
+            (failed.length ? ' ' + failed.length + ' failed.' : '');
+          if (window.__launcher && window.__launcher.toast) window.__launcher.toast(msg);
+          else alert(msg);
+          invalidateCache();
+          return refreshListAndFlags();
+        });
+      }
+
+      // Plans a launcher JSON bundle (Export All / cloud format).
+      function planBundleImport(text) {
+        var data = JSON.parse(text);
+        if (!data || !data.files || typeof data.files !== 'object') {
+          throw new Error('Invalid save bundle format.');
+        }
+        var isEncoded = data.version === 2;
+        var planned = [];
+        var rejected = [];
+        // Decode everything before writing anything: a bad entry used to
+        // reject the batch halfway, leaving a half-imported save set.
+        Object.keys(data.files).forEach(function(key) {
+          var decodedKey = isEncoded ? decodeKey(key) : key;
+          var fullKey = normalizeKey(decodedKey);
+          var v = data.files[key];
+          if (fullKey === null || !v || typeof v !== 'object') { rejected.push(String(decodedKey)); return; }
+          var bytes;
+          try {
+            bytes = v.contents == null ? new Uint8Array(0) : fromBase64(v.contents);
+          } catch (err) { rejected.push(displayName(fullKey)); return; }
+          planned.push({ key: fullKey, value: {
+            mode: typeof v.mode === 'number' ? v.mode : FILE_MODE,
+            timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
+            contents: bytes
+          } });
+        });
+        return { planned: planned, rejected: rejected };
+      }
+
+      // Plans DELTARUNE's own save files, copied straight out of the game's
+      // save folder (filech2_0, filech2_0.backup, dr.ini, keyconfig_0.ini …).
+      // They are raw files with no wrapper, which the JSON-only importer used to
+      // reject outright — the game writes them under exactly these names, so
+      // each one becomes /_savedata/<filename> with its own mtime.
+      function planRawImport(files) {
+        var rejected = [];
+        var usable = [];
+        files.forEach(function(f) {
+          if (f.name === '.DS_Store' || f.name === 'Thumbs.db' || f.name === 'desktop.ini') return; // OS junk
+          if (normalizeKey(f.name) === null) { rejected.push(f.name); return; }
+          if (f.size > MAX_IMPORT_BYTES) { rejected.push(f.name + ' (too large)'); return; }
+          usable.push(f);
+        });
+        return Promise.all(usable.map(function(f) {
+          return f.arrayBuffer().then(function(buf) {
+            return { key: normalizeKey(f.name), value: {
+              mode: FILE_MODE,
+              // Keep the file's own mtime so the list's date column and the
+              // game's reconcile see the real save time.
+              timestamp: new Date(f.lastModified || Date.now()),
+              contents: new Uint8Array(buf)
+            } };
+          });
+        })).then(function(planned) {
+          return { planned: planned, rejected: rejected };
+        });
+      }
+
       importInput.addEventListener('change', function(e) {
-        const file = e.target.files && e.target.files[0];
-        if (!file) return;
-        if (!confirm('Importing will OVERWRITE existing save files with matching names.\nContinue?')) {
+        var files = e.target.files ? Array.prototype.slice.call(e.target.files) : [];
+        if (!files.length) return;
+        // One .json file is a launcher bundle; anything else is the game's own
+        // save files.
+        var bundle = (files.length === 1 && /\.json$/i.test(files[0].name)) ? files[0] : null;
+        var what = bundle ? 'the save bundle "' + bundle.name + '"'
+                          : files.length + ' save file(s)';
+        if (!confirm('Import ' + what + '?\n\nFiles with the same name are replaced. A .bak of each replaced file is kept.')) {
           importInput.value = '';
           return;
         }
-        file.text().then(function(text) {
-          const data = JSON.parse(text);
-          if (!data || !data.files || typeof data.files !== 'object') {
-            throw new Error('Invalid save file format.');
-          }
-          const isEncoded = data.version === 2;
-          const entries = Object.keys(data.files);
-          const promises = entries.map(function(key) {
-            var decodedKey = isEncoded ? decodeKey(key) : key;
-            const v = data.files[key];
-            const value = {
-              mode: typeof v.mode === 'number' ? v.mode : 33206,
-              timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
-              contents: v.contents ? fromBase64(v.contents) : new Uint8Array(0)
-            };
-            return putEntry(decodedKey, value);
-          });
-          return Promise.all(promises).then(function() {
-            if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Imported ' + entries.length + ' file(s).');
-            else alert('Imported ' + entries.length + ' file(s).');
-            refreshList();
-          });
+        beginBusy();
+        var plan = bundle
+          ? bundle.text().then(function(text) { return planBundleImport(text); })
+          : planRawImport(files);
+        plan.then(function(p) {
+          return runImport(p.planned, p.rejected);
         }).catch(function(err) {
           alert('Import failed: ' + (err && err.message ? err.message : err));
-        }).finally(function() {
+        }).then(function() {
+          endBusy();
           importInput.value = '';
         });
       });
 
-      // Entries written before keys were normalised are stored under a bare
-      // name, are invisible to the game, and are deleted by the next syncfs.
-      // Move them to their correct /_savedata/ path.
-      function findBrokenKeys() {
-        return listKeys().then(function(keys) {
-          return keys.filter(function(k) {
-            return !k.endsWith('/') && k !== SAVE_DIR && k !== normalizeKey(k);
+      // An entry is invisible to the game when its key is not the full IDBFS
+      // path, or when its value is shaped so the game's reconcile throws on it.
+      // Both cases mean the save is never loaded and is discarded by the next
+      // syncfs; repair rewrites key and value.
+      var brokenKeys = {};
+
+      function findBrokenEntries() {
+        return listAll().then(function(items) {
+          var broken = [];
+          items.forEach(function(item) {
+            var key = String(item.key);
+            if (key.endsWith('/') || key === SAVE_DIR) return;
+            var reason = brokenReason(key, item.value);
+            if (reason) {
+              broken.push({
+                key: key,
+                goodKey: normalizeKey(key),
+                reason: reason,
+                value: item.value,
+                repairable: isRepairable(item.value)
+              });
+            }
           });
+          return broken;
         });
       }
 
+      // How much a candidate is worth keeping when two entries claim the same
+      // path: real bytes beat an empty file, then the newer timestamp wins.
+      function entryWeight(value) {
+        var v = value || {};
+        var bytes = toBytes(v.contents);
+        var size = bytes ? bytes.length : (v.contents == null ? 0 : -1);
+        var time = v.timestamp instanceof Date && !isNaN(v.timestamp.getTime()) ? v.timestamp.getTime() : 0;
+        return { size: size, time: time };
+      }
+
+      function firstIsBetter(a, b) {
+        var wa = entryWeight(a), wb = entryWeight(b);
+        if ((wa.size > 0) !== (wb.size > 0)) return wa.size > 0;
+        if (wa.size !== wb.size) return wa.size > wb.size;
+        return wa.time >= wb.time;
+      }
+
       function updateRepairButton() {
-        return findBrokenKeys().then(function(broken) {
+        return findBrokenEntries().then(function(broken) {
+          brokenKeys = {};
+          broken.forEach(function(b) { brokenKeys[b.key] = b.reason; });
           repairPathsBtn.hidden = broken.length === 0;
           if (broken.length) {
-            repairPathsBtn.textContent = 'Repair save paths (' + broken.length + ')';
+            repairPathsBtn.textContent = 'Repair saves (' + broken.length + ')';
           }
-        }).catch(function() { repairPathsBtn.hidden = true; });
+          return broken;
+        }).catch(function() {
+          repairPathsBtn.hidden = true;
+          return [];
+        });
       }
 
       repairPathsBtn.addEventListener('click', function() {
-        cloudBusy = true;
-        findBrokenKeys().then(function(broken) {
+        beginBusy();
+        findBrokenEntries().then(function(broken) {
           if (!broken.length) { repairPathsBtn.hidden = true; return; }
-          if (!confirm('Repair ' + broken.length + ' save file(s)?\n\n' +
-              'These are stored under a name the game cannot read, so it never loads ' +
-              'them and they are discarded the next time a chapter saves.\n\n' +
-              broken.slice(0, 10).map(function(k) {
-                return '  ' + k + '  →  ' + normalizeKey(k);
-              }).join('\n') + (broken.length > 10 ? '\n  ...' : ''))) {
+          var fixable = broken.filter(function(b) { return b.repairable && b.goodKey !== null; });
+          var unfixable = broken.length - fixable.length;
+          if (!fixable.length) {
+            alert('None of the ' + broken.length + ' unreadable entry(ies) can be repaired automatically ' +
+              'without discarding their contents, so nothing was changed. Export them and inspect them by hand.');
+            return;
+          }
+          if (!confirm('Repair ' + fixable.length + ' save file(s)?\n\n' +
+              'The game cannot read these, so it loads none of them and discards ' +
+              'them the next time a chapter saves.\n\n' +
+              fixable.slice(0, 10).map(function(b) {
+                return '  ' + displayName(b.key) + ' — ' + b.reason;
+              }).join('\n') + (fixable.length > 10 ? '\n  ...' : '') +
+              (unfixable ? '\n\n' + unfixable + ' entry(ies) will be left untouched: their contents cannot be converted.' : ''))) {
             return Promise.reject({ cancelled: true });
           }
-          var moved = 0, dropped = 0;
+          var repaired = 0, kept = 0, failed = 0;
           var chain = Promise.resolve();
-          broken.forEach(function(badKey) {
+          fixable.forEach(function(entry) {
             chain = chain.then(function() {
-              var goodKey = normalizeKey(badKey);
-              return getEntry(goodKey).then(function(existing) {
-                if (existing) {
-                  // A real save already lives at the correct path; don't
-                  // clobber it, just remove the stray entry.
-                  dropped++;
-                  return deleteEntry(badKey);
+              return getRawEntry(entry.key).then(function(val) {
+                if (!val) return;
+                if (entry.goodKey === entry.key) {
+                  return putEntry(entry.key, val).then(function() { repaired++; });
                 }
-                return getRawEntry(badKey).then(function(val) {
-                  if (!val) return;
-                  return putEntry(goodKey, val).then(function() {
-                    moved++;
-                    return deleteEntry(badKey);
+                return getRawEntry(entry.goodKey).then(function(existing) {
+                  if (!existing) {
+                    return putEntry(entry.goodKey, val).then(function() {
+                      repaired++;
+                      return deleteEntry(entry.key);
+                    });
+                  }
+                  // Both paths hold data. Deleting the loser used to throw away
+                  // a full save because a 0-byte file happened to sit at the
+                  // good path, so the loser is parked as .stray instead.
+                  if (firstIsBetter(val, existing)) {
+                    return putEntry(entry.goodKey + '.stray', existing).then(function() {
+                      return putEntry(entry.goodKey, val);
+                    }).then(function() {
+                      repaired++;
+                      return deleteEntry(entry.key);
+                    });
+                  }
+                  return putEntry(entry.goodKey + '.stray', val).then(function() {
+                    kept++;
+                    return deleteEntry(entry.key);
                   });
                 });
-              });
+              }).catch(function() { failed++; });
             });
           });
           return chain.then(function() {
             invalidateCache();
-            return refreshList();
+            return refreshListAndFlags();
           }).then(function() {
-            var msg = 'Repaired ' + moved + ' save file(s)' +
-              (dropped ? ', removed ' + dropped + ' duplicate(s)' : '') + '.';
+            var msg = 'Repaired ' + repaired + ' save file(s)' +
+              (kept ? ', parked ' + kept + ' older duplicate(s) as .stray' : '') +
+              (unfixable ? ', left ' + unfixable + ' unconvertible entry(ies) untouched' : '') +
+              (failed ? ', ' + failed + ' failed' : '') + '.';
             if (window.__launcher && window.__launcher.toast) window.__launcher.toast(msg);
             else alert(msg);
-            return updateRepairButton();
           });
         }).catch(function(err) {
           if (err && err.cancelled) return;
           alert('Repair failed: ' + (err && err.message ? err.message : err));
-        }).then(function() {
-          cloudBusy = false;
-        });
+        }).then(function() { endBusy(); });
       });
 
       clearBackupsBtn.addEventListener('click', function() {
+        beginBusy();
         listAll().then(function(items) {
-          var bakItems = items.filter(function(item) { return item.key.endsWith('.bak'); });
+          var keys = {};
+          items.forEach(function(item) { keys[String(item.key)] = true; });
+          var bakItems = items.filter(function(item) { return String(item.key).endsWith('.bak'); });
           if (bakItems.length === 0) {
             if (window.__launcher && window.__launcher.toast) window.__launcher.toast('No backup files to clear.');
             else alert('No backup files to clear.');
             return;
           }
-          if (!confirm('Delete all ' + bakItems.length + ' backup files?\nThis cannot be undone.')) return;
-          var promises = bakItems.map(function(item) { return deleteEntry(item.key); });
+          // A .bak whose original is gone (deleted, renamed) is the last copy
+          // of that save — clearing it would be the actual data loss.
+          var orphans = bakItems.filter(function(item) { return !keys[String(item.key).slice(0, -4)]; });
+          var deletable = bakItems.filter(function(item) { return keys[String(item.key).slice(0, -4)]; });
+          if (!deletable.length) {
+            alert('The only backups left have no original file, so they are the last copy of those saves. Nothing was deleted.');
+            return;
+          }
+          if (!confirm('Delete ' + deletable.length + ' backup file(s)?\nThis cannot be undone.' +
+              (orphans.length ? '\n\n' + orphans.length + ' backup(s) whose original is gone will be KEPT.' : ''))) return;
+          var promises = deletable.map(function(item) { return deleteEntry(item.key); });
           return Promise.all(promises).then(function() {
-            if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Deleted ' + bakItems.length + ' backup file(s).');
-            else alert('Deleted ' + bakItems.length + ' backup file(s).');
+            var msg = 'Deleted ' + deletable.length + ' backup file(s).' +
+              (orphans.length ? ' Kept ' + orphans.length + ' with no original.' : '');
+            if (window.__launcher && window.__launcher.toast) window.__launcher.toast(msg);
+            else alert(msg);
             invalidateCache();
-            refreshList();
+            return refreshListAndFlags();
           });
         }).catch(function(err) {
           alert('Error clearing backups: ' + (err && err.message ? err.message : err));
-        });
+        }).then(function() { endBusy(); });
       });
 
       var tennaWindow = null;
+      var tennaSession = null;   // { win, key } for the editor that is open now
 
       function openTennaEditor(key, value) {
-        if (!value || !value.contents) { alert('Select a save file first.'); return; }
+        var bytes = toBytes(value && value.contents);
+        if (!bytes) { alert('Select a save file with readable contents first.'); return; }
         if (tennaWindow && !tennaWindow.closed) { tennaWindow.close(); }
-        tennaWindow = window.open('tenna/', 'tenna-editor', 'width=1400,height=900');
-        if (!tennaWindow) { alert('Pop-up blocked. Allow pop-ups for this site.'); return; }
-
-        var bytes = value.contents;
-        if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
+        var win = window.open('tenna/', 'tenna-editor', 'width=1400,height=900');
+        if (!win) { alert('Pop-up blocked. Allow pop-ups for this site.'); return; }
+        tennaWindow = win;
+        // Bind the session to THIS window and THIS key: the old code closed over
+        // a shared variable and never removed its listener on timeout, so a
+        // later editor could be fed the previous save's bytes.
+        tennaSession = { win: win, key: key };
 
         var timeout = setTimeout(function() {
+          window.removeEventListener('message', handler);
+          if (tennaSession && tennaSession.win === win) tennaSession = null;
           alert('Tenna Editor took too long to load. Try again.');
         }, 15000);
 
         function handler(e) {
-          if (e.data && e.data.type === 'tenna-ready' && e.source === tennaWindow) {
-            clearTimeout(timeout);
-            window.removeEventListener('message', handler);
-            // Hand Tenna the bare save name; putEntry normalises whatever comes
-            // back, so the round-trip lands on the correct /_savedata/ path.
-            tennaWindow.postMessage({ type: 'tenna-open', saveData: { bytes: bytes, filename: displayName(key) } }, window.location.origin);
-          }
+          if (e.origin !== window.location.origin || e.source !== win) return;
+          if (!e.data || e.data.type !== 'tenna-ready') return;
+          clearTimeout(timeout);
+          window.removeEventListener('message', handler);
+          win.postMessage({ type: 'tenna-open', saveData: { bytes: bytes, filename: displayName(key) } }, window.location.origin);
         }
         window.addEventListener('message', handler);
       }
 
       // Listen for exported saves from Tenna Editor
       window.addEventListener('message', function(e) {
-        if (e.data && e.data.type === 'tenna-exported' && e.data.bytes && e.source === tennaWindow && e.origin === window.location.origin) {
-          var key = e.data.filename || 'imported.sav';
-          var val = {
-            contents: e.data.bytes,
-            mode: 33206,
-            timestamp: new Date()
-          };
-          putEntry(key, val).then(function() {
-            if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Save updated from Tenna Editor.');
-            else alert('Save updated from Tenna Editor.');
-            refreshList();
-          }).catch(function(err) {
-            alert('Error saving: ' + (err && err.message ? err.message : err));
+        if (e.origin !== window.location.origin) return;
+        if (!e.data || e.data.type !== 'tenna-exported') return;
+        if (!tennaSession || e.source !== tennaSession.win) return;
+        var bytes = toBytes(e.data.bytes);
+        if (!bytes || !bytes.length) { alert('Tenna Editor returned no usable data; nothing was written.'); return; }
+        // Write back to the file we handed it. Trusting e.data.filename meant a
+        // rename inside Tenna landed the edit on a different save (or created
+        // one) while the original stayed untouched.
+        var key = tennaSession.key;
+        beginBusy();
+        getRawEntry(key).then(function(existing) {
+          var backup = Promise.resolve();
+          if (existing && isRepairable(existing) && !key.endsWith('.bak')) {
+            backup = getRawEntry(key + '.bak').then(function(bak) {
+              if (bak) return null;
+              return putEntry(key + '.bak', existing).catch(function() {});
+            });
+          }
+          return backup.then(function() {
+            return putEntry(key, { contents: bytes, mode: (existing && existing.mode) || FILE_MODE, timestamp: new Date() });
           });
-        }
+        }).then(function() {
+          if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Save updated from Tenna Editor.');
+          else alert('Save updated from Tenna Editor.');
+          invalidateCache();
+          return refreshListAndFlags();
+        }).catch(function(err) {
+          alert('Error saving: ' + (err && err.message ? err.message : err));
+        }).then(function() { endBusy(); });
       });
 
       tennaBtn.addEventListener('click', function() {
@@ -1336,6 +1839,7 @@
       function openModal() {
         savesModal.hidden = false;
         savesSearch.value = '';
+        if (searchClearBtn) searchClearBtn.hidden = true;
         if (window.__launcher && window.__launcher.isGameStarted()) {
           savesWarning.hidden = false;
         } else {
@@ -1343,33 +1847,41 @@
         }
         saveEditor.hidden = true;
         isDirty = false;
-        refreshList();
-        updateRepairButton();
+        // Scan for unreadable entries first: the list marks them from the result.
+        refreshListAndFlags();
         if (saveTimer) clearInterval(saveTimer);
-        // Auto-refresh only while the list is showing and there are no unsaved edits.
-        // Invalidate the cache first so saves written by the running game are picked up.
+        // Auto-refresh only while the list is showing, there are no unsaved
+        // edits, and no long operation is running — a repair or a cloud restore
+        // used to be repainted out from under itself every 5 s.
         saveTimer = setInterval(function() {
-          if (saveEditor.hidden && !isDirty) { invalidateCache(); refreshList(); }
+          if (saveEditor.hidden && !isDirty && !isBusy()) {
+            invalidateCache();
+            refreshListAndFlags();
+          }
         }, 5000);
       }
+      // Returns true when the modal actually closed, so the Escape handler only
+      // swallows the key when it did something.
       function closeModal() {
-        if (cloudBusy) return;
-        if (!checkUnsaved()) return;
+        if (isBusy()) {
+          if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Still working — finishing the current operation.');
+          return false;
+        }
+        if (!checkUnsaved()) return false;
+        var lastKey = currentKey;
         savesModal.hidden = true;
         savesWarning.hidden = true;
         saveEditor.hidden = true;
         hexPreview.hidden = true;
+        if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
         isDirty = false;
         currentKey = null;
         currentValue = null;
-        if (saveTimer) clearInterval(saveTimer);
-        // clear all auto-save drafts
-        try {
-          var keys = Object.keys(sessionStorage);
-          for (var i = 0; i < keys.length; i++) {
-            if (keys[i].indexOf('deltarune_draft_') === 0) sessionStorage.removeItem(keys[i]);
-          }
-        } catch(e) {}
+        if (saveTimer) { clearInterval(saveTimer); saveTimer = null; }
+        // Only the file that was open loses its draft: wiping every draft here
+        // destroyed unsaved work on other files that the user never touched.
+        clearDraft(lastKey);
+        return true;
       }
 
       // ── Firebase config ──────────────────────────────────────────────
@@ -1387,25 +1899,99 @@
 
       var rtdb = null;
       var firebaseLoading = false;
-      var cloudBusy = false;
       var cloudIdInput = document.getElementById('cloudId');
       var uploadBtn = document.getElementById('uploadBtn');
       var downloadBtn = document.getElementById('downloadBtn');
       var CLOUD_ID_KEY = 'deltarune_cloud_id';
 
+      // RTDB queues reads and writes indefinitely when the network is gone
+      // instead of failing, so a cloud op could stay pending forever: the busy
+      // guard was never released and the modal's x, its backdrop and Escape all
+      // stopped working until a reload. Every Firebase call races this deadline.
+      var CLOUD_TIMEOUT_MS = 20000;
+      var SDK_POLL_MAX = Math.ceil(CLOUD_TIMEOUT_MS / 500);
+      // Per-entry cap on a remote payload: the cloud node is attacker-writable,
+      // and decoding then writing an unbounded base64 blob hangs the tab.
+      var MAX_ENTRY_B64 = 8 * 1024 * 1024;
+
+      function withTimeout(promise, label) {
+        return new Promise(function(resolve, reject) {
+          var settled = false;
+          var timer = setTimeout(function() {
+            if (settled) return;
+            settled = true;
+            var err = new Error((label || 'Cloud operation') + ' timed out after ' + Math.round(CLOUD_TIMEOUT_MS / 1000) + 's.');
+            err.timedOut = true;
+            reject(err);
+          }, CLOUD_TIMEOUT_MS);
+          Promise.resolve(promise).then(function(v) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(v);
+          }, function(e) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(e);
+          });
+        });
+      }
+
+      // Failures used alert() while successes used toast(); once the browser's
+      // "prevent additional dialogs" box is ticked, every cloud failure became
+      // silent. Toast first, alert only when the launcher bridge is missing.
+      function cloudNotify(msg) {
+        if (window.__launcher && window.__launcher.toast) window.__launcher.toast(msg);
+        else alert(msg);
+      }
+
+      // Both buttons are disabled together while the SDK loads, so both have to
+      // be released when a cloud op ends: re-enabling only the button that ran
+      // left the other one dead until a reload.
+      function setCloudButtonsEnabled(enabled) {
+        uploadBtn.disabled = !enabled;
+        downloadBtn.disabled = !enabled;
+      }
+
+      function endCloudOp() {
+        uploadBtn.textContent = '\u2601 Upload';
+        downloadBtn.textContent = '\u2601 Download';
+        setCloudButtonsEnabled(true);
+        endBusy();
+      }
+
       // Restore persisted Cloud ID
       try { var savedId = localStorage.getItem(CLOUD_ID_KEY); if (savedId) cloudIdInput.value = savedId; } catch(e) {}
-      cloudIdInput.addEventListener('input', function() {
-        try { localStorage.setItem(CLOUD_ID_KEY, cloudIdInput.value.trim()); } catch(e) {}
-      });
+      // Persisting on every keystroke stored the empty string the moment the box
+      // was cleared, losing the id that is the only route back to the backup.
+      function persistCloudId() {
+        var id = cloudIdInput.value.trim();
+        if (!id) return;
+        try { localStorage.setItem(CLOUD_ID_KEY, id); } catch(e) {}
+      }
+      cloudIdInput.addEventListener('change', persistCloudId);
+      cloudIdInput.addEventListener('blur', persistCloudId);
+
+      // Rewriting ". # $ / [ ] ~" to "_" mapped "a.b", "a/b" and "a_b" onto the
+      // same node, so unrelated ids silently shared one backup. Validate the id
+      // instead of mangling it.
+      var CLOUD_ID_RE = /^[A-Za-z0-9_-]{3,64}$/;
 
       function getCloudPath() {
         var id = cloudIdInput.value.trim();
-        if (!id) return null;
-        return 'saves/' + id.replace(/[\.\#\$\/\[\]~]/g, '_');
+        if (!CLOUD_ID_RE.test(id)) return null;
+        return 'saves/' + id;
       }
 
-      function initFirebase() {
+      function cloudIdError() {
+        return cloudIdInput.value.trim()
+          ? 'Cloud ID must be 3-64 characters, using only letters, digits, "_" and "-".'
+          : 'Enter a Cloud ID first.';
+      }
+
+      function initFirebase(pollCount) {
+        var polls = pollCount || 0;
         return new Promise(function(resolve, reject) {
           if (firebaseConfig.apiKey === 'YOUR_API_KEY') {
             reject(new Error('Firebase not configured.'));
@@ -1414,19 +2000,24 @@
           if (rtdb) { resolve(rtdb); return; }
           if (typeof firebase === 'undefined') {
             if (firebaseLoading) {
-              // Already loading — wait a bit and retry
-              setTimeout(function() { initFirebase().then(resolve).catch(reject); }, 500);
+              // The waiter polled every 500ms with no cap: a gstatic request
+              // that never settled left this promise pending for good, and with
+              // it the busy guard that locks the modal.
+              if (polls >= SDK_POLL_MAX) {
+                firebaseLoading = false;
+                reject(new Error('Firebase SDK did not finish loading.'));
+                return;
+              }
+              setTimeout(function() { initFirebase(polls + 1).then(resolve, reject); }, 500);
               return;
             }
             firebaseLoading = true;
-            uploadBtn.disabled = true;
-            downloadBtn.disabled = true;
-            loadFirebaseSDK().then(function() {
-              initFirebase().then(resolve).catch(reject);
+            setCloudButtonsEnabled(false);
+            // A blocked script request fires neither onload nor onerror.
+            withTimeout(loadFirebaseSDK(), 'Firebase SDK download').then(function() {
+              initFirebase(polls + 1).then(resolve, reject);
             }).catch(function(e) {
               firebaseLoading = false;
-              uploadBtn.disabled = false;
-              downloadBtn.disabled = false;
               reject(e);
             });
             return;
@@ -1467,58 +2058,78 @@
       }
 
       // Encode/decode file keys for RTDB (forbidden: . # $ / [ ])
+      // The hex is UTF-8 bytes, not UTF-16 code units: truncating each unit to
+      // its low byte turned "\u4e2d" into "2d", so non-ASCII names collided with
+      // each other and came back as a different name. An ASCII payload from the
+      // old encoder decodes byte-for-byte the same, so "~" stays compatible.
       function encodeKey(key) {
-        if (/[\.\#\$\/\[\]~]/.test(key)) {
-          var hex = '';
-          for (var i = 0; i < key.length; i++) {
-            var c = key.charCodeAt(i).toString(16);
-            hex += ('00' + c).slice(-2);
-          }
-          return '~' + hex;
-        }
-        return key;
-      }
-      function decodeKey(key) {
-        if (key.charAt(0) === '~') {
-          var hex = key.slice(1);
-          if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) return key;
-          var str = '';
-          for (var i = 0; i < hex.length; i += 2) {
-            str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
-          }
-          return str;
-        }
-        return key;
+        var s = String(key == null ? '' : key);
+        if (!/[\.\#\$\/\[\]~]/.test(s) && !/[^\x20-\x7e]/.test(s)) return s;
+        var bytes = new TextEncoder().encode(s);
+        var hex = '';
+        for (var i = 0; i < bytes.length; i++) hex += ('0' + bytes[i].toString(16)).slice(-2);
+        return '~' + hex;
       }
 
-      function hashContent(bytes) {
-        if (typeof crypto !== 'undefined' && crypto.subtle) {
-          return crypto.subtle.digest('SHA-256', bytes).then(function(hash) {
-            var hex = '';
-            var view = new Uint8Array(hash);
-            for (var i = 0; i < view.length; i++) hex += ('00' + view[i].toString(16)).slice(-2);
-            return hex;
-          }).catch(function() { return null; });
+      function decodeKey(key) {
+        var s = String(key == null ? '' : key);
+        if (s.charAt(0) !== '~') return s;
+        var hex = s.slice(1);
+        if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) return s;
+        var bytes = new Uint8Array(hex.length / 2);
+        for (var i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+        try {
+          return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        } catch (e) {
+          // Not valid UTF-8: a latin-1 payload written by the old encoder.
+          var out = '';
+          for (var j = 0; j < bytes.length; j++) out += String.fromCharCode(bytes[j]);
+          return out;
         }
-        return Promise.resolve(null);
+      }
+
+      // crypto.subtle is undefined on a non-secure origin, where this resolves
+      // null. null means "not checked", never "matches": the old
+      // "if (computed && computed !== hash)" passed vacuously there, so the
+      // download claimed integrity it had never verified.
+      function hashContent(bytes) {
+        if (typeof crypto === 'undefined' || !crypto.subtle) return Promise.resolve(null);
+        return crypto.subtle.digest('SHA-256', bytes).then(function(hash) {
+          var hex = '';
+          var view = new Uint8Array(hash);
+          for (var i = 0; i < view.length; i++) hex += ('00' + view[i].toString(16)).slice(-2);
+          return hex;
+        }).catch(function() { return null; });
       }
 
       function getAllSavesAsObject() {
         return listAll().then(function(items) {
-          var out = { version: 2, exportedAt: new Date().toISOString(), files: {} };
+          var out = { version: 2, exportedAt: new Date().toISOString(), files: {}, unreadable: 0 };
           var hashPromises = [];
           items.forEach(function(item) {
             if (isDirectory(item.value)) return;
+            // Never upload the local ".bak" copies: encodeKey(name) sorts before
+            // encodeKey(name + '.bak'), so on the next download the cloud's stale
+            // .bak landed *after* its file and destroyed the backup that download
+            // had just taken of the local copy.
+            if (String(item.key).slice(-4) === '.bak') return;
             var v = item.value || {};
             var contents = v.contents;
             if (contents instanceof ArrayBuffer) contents = new Uint8Array(contents);
-            var b64 = contents instanceof Uint8Array ? toBase64(contents) : null;
+            if (!(contents instanceof Uint8Array)) {
+              // Uploading contents:null makes the entry download as an empty file
+              // and blank a good save on the other device. Leave it out instead.
+              out.unreadable++;
+              return;
+            }
+            var ts = v.timestamp instanceof Date ? v.timestamp : new Date(v.timestamp || Date.now());
+            if (isNaN(ts.getTime())) ts = new Date();
             var entry = {
-              mode: v.mode,
-              timestamp: v.timestamp instanceof Date ? v.timestamp.toISOString() : v.timestamp,
-              contents: b64
+              mode: typeof v.mode === 'number' ? v.mode : FILE_MODE,
+              timestamp: ts.toISOString(),
+              contents: toBase64(contents)
             };
-            hashPromises.push(hashContent(contents instanceof Uint8Array ? contents : null).then(function(h) {
+            hashPromises.push(hashContent(contents).then(function(h) {
               if (h) entry.hash = h;
             }));
             out.files[encodeKey(item.key)] = entry;
@@ -1527,62 +2138,159 @@
         });
       }
 
+      // One place decides what a cloud payload would do to the local store, so
+      // the confirm-dialog preview and the write chain can never disagree, and
+      // every entry is validated and decoded before the first byte is written.
+      // Nothing is skipped silently: each reason has its own counter.
+      function planCloudImport(cloudFiles, localItems) {
+        var localMap = {};
+        localItems.forEach(function(item) {
+          if (!isDirectory(item.value)) localMap[item.key] = item.value;
+        });
+        var plan = {
+          writes: [], total: Object.keys(cloudFiles).length,
+          created: 0, updated: 0, skipped: 0, older: 0,
+          rejected: 0, oversized: 0, unusable: 0,
+          corrupt: 0, unverified: 0, failed: 0
+        };
+        Object.keys(cloudFiles).forEach(function(key) {
+          var v = cloudFiles[key];
+          if (!v || typeof v !== 'object') { plan.unusable++; return; }
+          if (isDirectory(v)) { plan.skipped++; return; }
+          var name = decodeKey(key);
+          // Ignore .bak entries from the cloud for the same reason we never
+          // upload them: one would overwrite the backup taken seconds earlier.
+          if (name.slice(-4) === '.bak') { plan.skipped++; return; }
+          // The key is remote input: decodeKey('~2e2e2f6576696c') is "../evil",
+          // so it only reaches putEntry through normalizeKey, which returns null
+          // for anything that cannot be stored as /_savedata/<name>.
+          var path = normalizeKey(name);
+          if (path === null) { plan.rejected++; return; }
+          if (v.contents != null && typeof v.contents !== 'string') { plan.unusable++; return; }
+          var b64 = typeof v.contents === 'string' ? v.contents : '';
+          if (b64.length > MAX_ENTRY_B64) { plan.oversized++; return; }
+          var existing = localMap[path] || null;
+          if (!b64 && existing) {
+            // An entry with no contents would blank a save that still has bytes.
+            var existingBytes = toBytes(existing.contents);
+            if (existingBytes && existingBytes.length) { plan.unusable++; return; }
+          }
+          var bytes;
+          try {
+            bytes = b64 ? fromBase64(b64) : new Uint8Array(0);
+          } catch (e) {
+            // fromBase64 is a bare atob and throws on a malformed payload.
+            // Decoding everything up front keeps one bad entry from aborting the
+            // chain half-way through an already part-replaced save set.
+            plan.unusable++;
+            return;
+          }
+          var cloudTime = v.timestamp != null ? new Date(v.timestamp).getTime() : NaN;
+          if (existing) {
+            var localTime = existing.timestamp instanceof Date ? existing.timestamp.getTime() : NaN;
+            // Nothing compared timestamps, so a month-old cloud copy replaced a
+            // newer local save while the dialog still called it an "update".
+            if (!isNaN(cloudTime) && !isNaN(localTime) && cloudTime < localTime) { plan.older++; return; }
+            plan.updated++;
+          } else {
+            plan.created++;
+          }
+          plan.writes.push({
+            path: path,
+            existing: existing,
+            bytes: bytes,
+            mode: typeof v.mode === 'number' ? v.mode : FILE_MODE,
+            timestamp: isNaN(cloudTime) ? new Date() : new Date(cloudTime),
+            hash: typeof v.hash === 'string' ? v.hash : null
+          });
+        });
+        return plan;
+      }
+
+      function describePlan(plan) {
+        var parts = [plan.created + ' new file(s)', plan.updated + ' to replace'];
+        if (plan.older) parts.push(plan.older + ' skipped (cloud copy is older)');
+        if (plan.skipped) parts.push(plan.skipped + ' skipped (directory or .bak)');
+        if (plan.rejected) parts.push(plan.rejected + ' rejected (unusable name)');
+        if (plan.oversized) parts.push(plan.oversized + ' skipped (over ' + formatSize(MAX_ENTRY_B64) + ')');
+        if (plan.unusable) parts.push(plan.unusable + ' skipped (unreadable contents)');
+        return parts.join(', ');
+      }
+
+      // Verify before writing, not alongside: the hash check used to live in a
+      // detached promise array while putEntry wrote regardless, so a mismatch was
+      // merely announced after the bad bytes had already replaced a good save.
+      function verifyPlan(plan) {
+        return Promise.all(plan.writes.map(function(w) {
+          return w.hash ? hashContent(w.bytes) : Promise.resolve(undefined);
+        })).then(function(hashes) {
+          var allowed = [];
+          plan.writes.forEach(function(w, i) {
+            var computed = hashes[i];
+            if (computed === undefined) { allowed.push(w); return; } // no hash in the payload
+            if (computed === null) {
+              // No crypto.subtle here, so these bytes are NOT verified and the
+              // summary has to say so rather than imply a passed check.
+              plan.unverified++;
+              allowed.push(w);
+              return;
+            }
+            if (computed !== w.hash) {
+              // Never overwrite a good local save with bytes that failed
+              // verification: drop the write and report it.
+              plan.corrupt++;
+              return;
+            }
+            allowed.push(w);
+          });
+          return allowed;
+        });
+      }
+
       function importSavesFromObject(data) {
         if (!data || !data.files || typeof data.files !== 'object') {
           return Promise.reject(new Error('Invalid cloud save data.'));
         }
         return listAll().then(function(localItems) {
-          var localMap = {};
-          localItems.forEach(function(item) {
-            if (!isDirectory(item.value)) localMap[item.key] = item.value;
-          });
-          var keys = Object.keys(data.files);
-          var created = 0, overwritten = 0, skipped = 0, corrupt = 0;
-          var verifyPromises = [];
-          // Write files one at a time to avoid racing with the game's IDBFS sync
-          var chain = Promise.resolve();
-          keys.forEach(function(key) {
-            chain = chain.then(function() {
-              var v = data.files[key] || {};
-              if (typeof v.mode === 'number' && (v.mode & 0xF000) === 0x4000) { skipped++; return; }
-              var decoded = decodeKey(key);
-              var contents = v.contents ? fromBase64(v.contents) : new Uint8Array(0);
-              // Verify content hash if present (async but fire-and-forget)
-              if (v.hash) {
-                verifyPromises.push(hashContent(contents).then(function(computedHash) {
-                  if (computedHash && computedHash !== v.hash) {
-                    corrupt++;
-                    if (window.__launcher && window.__launcher.toast) {
-                      window.__launcher.toast('Hash mismatch for ' + decoded + ' — data may be corrupt.');
-                    }
-                  }
-                }));
-              }
-              var value = {
-                mode: typeof v.mode === 'number' ? v.mode : 33206,
-                timestamp: v.timestamp ? new Date(v.timestamp) : new Date(),
-                contents: contents
-              };
-              var existing = localMap[decoded];
-              if (existing) {
-                overwritten++;
-                if (decoded.slice(-4) !== '.bak') {
-                  var bakValue = { contents: existing.contents, mode: existing.mode, timestamp: new Date() };
-                  return putEntry(decoded + '.bak', bakValue).then(function() {
-                    return putEntry(decoded, value);
+          var plan = planCloudImport(data.files, localItems);
+          return verifyPlan(plan).then(function(writes) {
+            var created = 0, overwritten = 0;
+            // Write files one at a time to avoid racing with the game's IDBFS sync
+            var chain = Promise.resolve();
+            writes.forEach(function(w) {
+              chain = chain.then(function() {
+                var value = { mode: w.mode, timestamp: w.timestamp, contents: w.bytes };
+                if (!w.existing) {
+                  // One rejected entry used to kill the rest of the chain after
+                  // earlier files had already been replaced: count it and go on.
+                  return putEntry(w.path, value).then(function() { created++; }, function(err) {
+                    plan.failed++;
+                    console.warn('Cloud import failed for ' + w.path, err);
                   });
-                } else {
-                  return putEntry(decoded, value);
                 }
-              } else {
-                created++;
-                return putEntry(decoded, value);
-              }
+                var bakPath = normalizeKey(w.path + '.bak');
+                if (bakPath === null) {
+                  // No representable backup name: refuse to replace the local
+                  // copy rather than overwrite it with no way back.
+                  plan.failed++;
+                  return;
+                }
+                var bakValue = { contents: w.existing.contents, mode: w.existing.mode, timestamp: new Date() };
+                return putEntry(bakPath, bakValue).then(function() {
+                  return putEntry(w.path, value);
+                }).then(function() { overwritten++; }, function(err) {
+                  plan.failed++;
+                  console.warn('Cloud import failed for ' + w.path, err);
+                });
+              });
             });
-          });
-          return chain.then(function() {
-            return Promise.all(verifyPromises).then(function() {
-              return { created: created, overwritten: overwritten, skipped: skipped, corrupt: corrupt, total: keys.length };
+            return chain.then(function() {
+              return {
+                created: created, overwritten: overwritten, skipped: plan.skipped,
+                older: plan.older, rejected: plan.rejected, oversized: plan.oversized,
+                unusable: plan.unusable, corrupt: plan.corrupt,
+                unverified: plan.unverified, failed: plan.failed, total: plan.total
+              };
             });
           });
         });
@@ -1609,55 +2317,57 @@
       openModal = function() { origOpenModal(); updateSyncStatus(); };
 
       // ── Retry helper for transient Firebase failures ──────────────────
-      function firebaseRetry(fn, maxRetries) {
-        if (maxRetries === undefined) maxRetries = 2;
-        var lastErr;
+      // A permanent failure (rejected by the security rules, bad config) can
+      // only fail the same way again, and retrying it just holds the modal for
+      // another few seconds. Our own timeout counts as permanent for that reason.
+      function isPermanentFirebaseError(err) {
+        if (!err) return false;
+        if (err.timedOut) return true;
+        var text = (String(err.code || '') + ' ' + String(err.message || '')).toUpperCase();
+        return text.indexOf('PERMISSION_DENIED') !== -1 ||
+               text.indexOf('PERMISSION DENIED') !== -1 ||
+               text.indexOf('UNAUTHORIZED') !== -1 ||
+               text.indexOf('INVALID_TOKEN') !== -1 ||
+               text.indexOf('NOT CONFIGURED') !== -1 ||
+               text.indexOf('APP/') !== -1;
+      }
+
+      // maxAttempts is the number of tries, honestly: attempt(1) against the old
+      // "maxRetries = 2" ran two of them, not the three the name promised.
+      function firebaseRetry(fn, maxAttempts) {
+        if (maxAttempts === undefined) maxAttempts = 3;
         function attempt(n) {
           return fn().catch(function(err) {
-            lastErr = err;
-            if (n < maxRetries) {
-              return new Promise(function(r) { setTimeout(r, 1000 * (n + 1)); }).then(function() {
-                return attempt(n + 1);
-              });
-            }
-            throw lastErr;
+            if (n >= maxAttempts || isPermanentFirebaseError(err)) throw err;
+            return new Promise(function(r) { setTimeout(r, 1000 * n); }).then(function() {
+              return attempt(n + 1);
+            });
           });
         }
         return attempt(1);
       }
 
-      // ── Diff preview for download ─────────────────────────────────────
-      function computeCloudDiff(cloudFiles, localFiles) {
-        var localMap = {};
-        localFiles.forEach(function(item) {
-          if (!isDirectory(item.value)) localMap[item.key] = item.value;
-        });
-        var created = 0, updated = 0, skipped = 0, bakWillCreate = 0;
-        Object.keys(cloudFiles).forEach(function(key) {
-          var v = cloudFiles[key] || {};
-          if (typeof v.mode === 'number' && (v.mode & 0xF000) === 0x4000) { skipped++; return; }
-          var decoded = decodeKey(key);
-          if (localMap[decoded]) {
-            updated++;
-            if (decoded.slice(-4) !== '.bak') bakWillCreate++;
-          } else {
-            created++;
-          }
-        });
-        return { created: created, updated: updated, skipped: skipped, bakWillCreate: bakWillCreate, total: Object.keys(cloudFiles).length };
-      }
-
       uploadBtn.addEventListener('click', function() {
+        if (isBusy()) { cloudNotify('A save operation is already running — try again in a moment.'); return; }
         var path = getCloudPath();
-        if (!path) { alert('Enter a Cloud ID first.'); return; }
-        if (!confirm('Upload all save files to the cloud? This will overwrite the cloud backup.')) return;
-        uploadBtn.disabled = true;
+        if (!path) { cloudNotify(cloudIdError()); return; }
+        var cloudId = cloudIdInput.value.trim();
+        var fileCount = 0;
+        beginBusy();
+        setCloudButtonsEnabled(false);
         uploadBtn.textContent = '\u231b Uploading...';
-        cloudBusy = true;
-        initFirebase().then(function() {
+        withTimeout(initFirebase(), 'Firebase init').then(function() {
           return getAllSavesAsObject();
         }).then(function(data) {
           if (!rtdb) { throw new Error('Firebase not initialized.'); }
+          fileCount = Object.keys(data.files).length;
+          // ref().set() replaces the whole node, and RTDB stores no empty object:
+          // uploading from an empty local DB deleted the node outright, so the
+          // next download said "No cloud saves found" and the only off-device
+          // backup was gone.
+          if (fileCount === 0) {
+            throw new Error('No local saves to upload. The cloud backup was left untouched.');
+          }
           // Estimate payload size: contents are already base64 strings; add ~10% JSON overhead
           var estBytes = 0;
           for (var k in data.files) {
@@ -1665,77 +2375,87 @@
             if (v.contents) estBytes += v.contents.length;
           }
           var estPayload = Math.round(estBytes * 1.1 + 1024);
-          if (estPayload > 10 * 1024 * 1024) {
-            if (!confirm('Upload size is estimated at ' + (estPayload / 1024 / 1024).toFixed(1) + ' MB. Continue?')) {
-              return Promise.reject({ cancelled: true });
-            }
-          }
+          // Confirm only now that the file count is known: "this will overwrite
+          // the cloud backup" gave no way to notice a near-empty upload.
+          var q = 'Replace the cloud backup for "' + cloudId + '" with ' + fileCount + ' save file(s) (~' + formatSize(estPayload) + ')?';
+          if (data.unreadable) q += '\n' + data.unreadable + ' local entry(ies) have unreadable contents and are left out.';
+          if (estPayload > 10 * 1024 * 1024) q += '\nWarning: that is a large upload.';
+          q += '\n\nThe cloud copy is replaced entirely. Local files are not touched.';
+          if (!confirm(q)) return Promise.reject({ cancelled: true });
           data.uploadedAt = new Date().toISOString();
-          return firebaseRetry(function() { return rtdb.ref(path).set(data); });
+          return firebaseRetry(function() { return withTimeout(rtdb.ref(path).set(data), 'Upload'); });
         }).then(function() {
-          uploadBtn.textContent = '\u2601 Upload';
-          uploadBtn.disabled = false;
-          if (window.__launcher && window.__launcher.toast) window.__launcher.toast('Saves uploaded to cloud.');
-          else alert('Saves uploaded successfully.');
+          cloudNotify('Uploaded ' + fileCount + ' save file(s) to the cloud.');
           try { localStorage.setItem(LAST_UPLOAD_KEY, new Date().toISOString()); } catch(e) {}
           updateSyncStatus();
         }).catch(function(err) {
           if (err && err.cancelled) return; // User cancelled — finally still runs
-          alert('Upload failed: ' + (err && err.message ? err.message : err));
+          cloudNotify('Upload failed: ' + (err && err.message ? err.message : err));
         }).finally(function() {
-          uploadBtn.textContent = '\u2601 Upload';
-          uploadBtn.disabled = false;
-          cloudBusy = false;
+          endCloudOp();
         });
       });
 
       downloadBtn.addEventListener('click', function() {
+        if (isBusy()) { cloudNotify('A save operation is already running — try again in a moment.'); return; }
         var path = getCloudPath();
-        if (!path) { alert('Enter a Cloud ID first.'); return; }
-        downloadBtn.disabled = true;
-        downloadBtn.textContent = '\u231b Checking...';
-        cloudBusy = true;
+        if (!path) { cloudNotify(cloudIdError()); return; }
         var cloudData = null;
-        initFirebase().then(function() {
+        var wrote = false;
+        beginBusy();
+        setCloudButtonsEnabled(false);
+        downloadBtn.textContent = '\u231b Checking...';
+        withTimeout(initFirebase(), 'Firebase init').then(function() {
           if (!rtdb) { throw new Error('Firebase not initialized.'); }
-          return firebaseRetry(function() { return rtdb.ref(path).once('value'); });
+          return firebaseRetry(function() { return withTimeout(rtdb.ref(path).once('value'), 'Download'); });
         }).then(function(snapshot) {
-          cloudData = snapshot.val();
+          cloudData = snapshot && snapshot.val ? snapshot.val() : null;
           if (!cloudData || !cloudData.files) {
             return Promise.reject({ noData: true });
           }
           // Compute diff preview
           return listAll();
         }).then(function(localItems) {
-          var diff = computeCloudDiff(cloudData.files, localItems);
-          var msg = 'Cloud has ' + diff.total + ' file(s). ';
-          if (diff.skipped) msg += diff.skipped + ' directory entries will be skipped. ';
-          msg += diff.created + ' new file(s), ' + diff.updated + ' update(s).';
-          if (diff.bakWillCreate) msg += ' ' + diff.bakWillCreate + ' .bak backup(s) will be created.';
+          var plan = planCloudImport(cloudData.files, localItems);
+          var msg = 'Cloud has ' + plan.total + ' entry(ies): ' + describePlan(plan) + '.';
+          if (plan.updated) msg += '\nEach replaced file is backed up to <name>.bak first.';
+          if (plan.created + plan.updated === 0) {
+            // Nothing would be written; don't report a download that did nothing.
+            return Promise.reject({ nothing: true, msg: msg });
+          }
           if (!confirm('Download summary:\n' + msg + '\n\nContinue with download?')) {
             return Promise.reject({ cancelled: true });
           }
           downloadBtn.textContent = '\u231b Downloading...';
+          wrote = true;
           return importSavesFromObject(cloudData);
         }).then(function(result) {
-          var msg = 'Downloaded from cloud: ' + result.created + ' new, ' + result.overwritten + ' updated';
+          var msg = 'Downloaded from cloud: ' + result.created + ' new, ' + result.overwritten + ' replaced';
+          if (result.older) msg += ', ' + result.older + ' kept (local copy is newer)';
           if (result.skipped) msg += ', ' + result.skipped + ' skipped';
-          if (result.corrupt) msg += ', ' + result.corrupt + ' HASH MISMATCH (data may be corrupt!)';
+          if (result.rejected) msg += ', ' + result.rejected + ' rejected (unusable name)';
+          if (result.oversized) msg += ', ' + result.oversized + ' skipped (too large)';
+          if (result.unusable) msg += ', ' + result.unusable + ' skipped (unreadable contents)';
+          if (result.corrupt) msg += ', ' + result.corrupt + ' NOT written (hash mismatch)';
+          if (result.unverified) msg += ', ' + result.unverified + ' unverified (integrity check unavailable)';
+          if (result.failed) msg += ', ' + result.failed + ' failed to write';
           msg += '.';
-          if (window.__launcher && window.__launcher.toast) window.__launcher.toast(msg);
-          else alert(msg);
+          cloudNotify(msg);
           try { localStorage.setItem(LAST_DOWNLOAD_KEY, new Date().toISOString()); } catch(e) {}
           updateSyncStatus();
-          invalidateCache();
-          refreshList();
         }).catch(function(err) {
           if (err && err.cancelled) return; // User cancelled
-          if (err && err.noData) { alert('No cloud saves found for this ID.'); return; }
-          alert('Download failed: ' + (err && err.message ? err.message : err));
+          if (err && err.noData) { cloudNotify('No cloud saves found for this ID.'); return; }
+          if (err && err.nothing) { cloudNotify('Nothing to download. ' + err.msg); return; }
+          cloudNotify('Download failed: ' + (err && err.message ? err.message : err));
         }).finally(function() {
-          downloadBtn.textContent = '\u2601 Download';
-          downloadBtn.disabled = false;
-          cloudBusy = false;
+          endCloudOp();
+          // The refresh used to sit on the success path only, so a download that
+          // failed part-way left the list describing the pre-download files.
+          if (wrote) {
+            invalidateCache();
+            refreshListAndFlags();
+          }
         });
       });
 
@@ -1745,16 +2465,27 @@
         if (e.target === savesModal) closeModal();
       });
       document.addEventListener('keydown', function(e) {
-        if (!savesModal.hidden && e.key === 'Escape') {
-          e.stopPropagation();
-          closeModal();
-        }
+        if (savesModal.hidden || e.key !== 'Escape') return;
+        // Only swallow Escape when the modal actually closed: closeModal() bails
+        // out while an operation is running or with unsaved edits, and stopping
+        // propagation first meant Escape did nothing at all in those states.
+        if (closeModal()) e.stopPropagation();
       }, true); // capture phase so it runs before launcher's keydown
 
       // Modal focus trap
       savesModal.addEventListener('keydown', function(e) {
         if (e.key !== 'Tab') return;
-        var focusable = savesModal.querySelectorAll('button, input, textarea, select, [tabindex]:not([tabindex="-1"])');
+        var candidates = savesModal.querySelectorAll('button, input, textarea, select, [tabindex]:not([tabindex="-1"])');
+        // A disabled or hidden control cannot take focus: including them (the
+        // hidden editor panel, the cloud buttons while an op runs) made Tab land
+        // nowhere and the trap stop cycling.
+        var focusable = [];
+        for (var i = 0; i < candidates.length; i++) {
+          var el = candidates[i];
+          if (el.disabled || el.hidden || el.closest('[hidden]')) continue;
+          if (el.getClientRects().length === 0) continue;
+          focusable.push(el);
+        }
         if (focusable.length === 0) return;
         var first = focusable[0], last = focusable[focusable.length - 1];
         if (e.shiftKey) {

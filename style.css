@@ -7,15 +7,21 @@
   box-sizing: border-box;
 }
 
-html, body {
+html {
   margin: 0;
   padding: 0;
   width: 100%;
   height: 100%;
-  overflow: hidden;
 }
 
+/* The page has to be free to grow past the viewport and scroll: with
+   height: 100% + overflow: hidden the 816px-tall menu was simply clipped,
+   so at 1280x480 chapters 5-7 could neither be scrolled to nor clicked. */
 body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100%;
   background: #000;
   color: #fff;
   font-family: 'Deltarune', monospace;
@@ -25,10 +31,12 @@ body {
   letter-spacing: 0.5px;
 }
 
-.stretched-text {
-  display: inline-block;
-  transform: scaleY(1.1);
-  transform-origin: bottom;
+/* ...but a running chapter is a full-viewport fixed iframe, and the saves
+   modal is its own scroll container: scrolling the page behind either one
+   would only expose the menu underneath and put a scrollbar over them. */
+html:has(#chapterFrame.active),
+html:has(.modal:not([hidden])) {
+  overflow: hidden;
 }
 
 .logo-container {
@@ -50,6 +58,10 @@ body {
   opacity: 0;
   pointer-events: none;
   transform: translateY(-10px);
+  /* Opacity alone leaves the rows in the tab order and in the accessibility
+     tree while a chapter is running; delay visibility so the fade survives. */
+  visibility: hidden;
+  transition: opacity 0.4s ease, transform 0.4s ease, visibility 0s linear 0.4s;
 }
 
 a {
@@ -83,7 +95,6 @@ a {
 
 .row > *,
 .title,
-.badge,
 .chapter {
   display: inline-block;
   transform: scaleY(1.1);
@@ -105,16 +116,6 @@ a {
 .row:focus-visible {
   outline: 2px solid #fefe00 !important;
   outline-offset: 2px;
-}
-
-.coming-soon {
-  opacity: 0.7;
-}
-
-.badge {
-  font-size: 24px;
-  color: #ff9;
-  padding-left: 20px;
 }
 
 .chapter {
@@ -220,7 +221,8 @@ img {
   font-family: monospace;
 }
 
-#speedSlider {
+#speedSlider,
+#volumeSlider {
   flex: 1;
   -webkit-appearance: none;
   appearance: none;
@@ -231,7 +233,8 @@ img {
   cursor: pointer;
 }
 
-#speedSlider::-webkit-slider-thumb {
+#speedSlider::-webkit-slider-thumb,
+#volumeSlider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
   width: 18px;
@@ -242,7 +245,8 @@ img {
   border: 2px solid #1a1a1a;
 }
 
-#speedSlider::-moz-range-thumb {
+#speedSlider::-moz-range-thumb,
+#volumeSlider::-moz-range-thumb {
   width: 18px;
   height: 18px;
   background: #fefe00;
@@ -251,7 +255,8 @@ img {
   border: 2px solid #1a1a1a;
 }
 
-#speedSlider:focus-visible {
+#speedSlider:focus-visible,
+#volumeSlider:focus-visible {
   box-shadow: 0 0 0 2px #fefe00;
 }
 
@@ -747,15 +752,22 @@ img {
   width: 100%;
   height: 100%;
   border: none;
-  display: none;
+  /* display flips in the same style recalc as opacity, so the 0.5s fade the
+     teardown waits for never ran; visibility can be held back instead. */
+  visibility: hidden;
   opacity: 0;
-  transition: opacity 0.5s ease;
+  /* The frame stays painted for the whole fade-out, so clicks in that window
+     have to fall through to the menu that is fading back in underneath. */
+  pointer-events: none;
+  transition: opacity 0.5s ease, visibility 0s linear 0.5s;
   z-index: 50;
 }
 
 #chapterFrame.active {
-  display: block;
+  visibility: visible;
   opacity: 1;
+  pointer-events: auto;
+  transition: opacity 0.5s ease, visibility 0s;
 }
 
 .back-btn {
@@ -821,7 +833,7 @@ img {
 @media (max-width: 768px) {
   body {
     font-size: 22px;
-    align-content: center;
+    align-content: safe center;
   }
 
   .logo {
