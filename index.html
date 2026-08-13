@@ -138,6 +138,7 @@
         <button id="importSavesBtn">Import</button>
         <input type="file" id="importInput" accept=".json,application/json" hidden>
         <button id="clearBackupsBtn">Clear Backups</button>
+        <button id="repairPathsBtn" hidden>Repair save paths</button>
       </div>
     </div>
   </div>
@@ -163,7 +164,7 @@
       const speedSlider = document.getElementById('speedSlider');
       const speedValue = document.getElementById('speedValue');
       const versionTag = document.getElementById('versionTag');
-      versionTag.textContent = 'v0.2.1 (' + new Date(document.lastModified).toISOString().split('T')[0] + ')';
+      versionTag.textContent = 'v0.2.2 (' + new Date(document.lastModified).toISOString().split('T')[0] + ')';
 
       function getSpeed() { var v = parseFloat(localStorage.getItem(SPEED_KEY)); return (isFinite(v) && v > 0) ? v : 1; }
       function setSpeed(v) {
@@ -394,6 +395,25 @@
     (function() {
       const DB_NAME = '/_savedata';
       const STORE = 'FILE_DATA';
+      // IDBFS keys every file by its absolute path under the mount point, and
+      // builds the local side of a sync as mountpoint + "/" + name. An entry
+      // stored under a bare name ("filech4_1") therefore has no local
+      // counterpart: the game never sees it, and the next syncfs deletes it as
+      // an orphan. Every key we write must be normalised to /_savedata/<name>.
+      const SAVE_DIR = '/_savedata';
+
+      function normalizeKey(name) {
+        var n = String(name == null ? '' : name);
+        // Leave the mount directory entry itself alone.
+        if (n === SAVE_DIR || n === SAVE_DIR + '/') return n;
+        n = n.replace(/^\/+/, '').replace(/^_savedata\/+/, '');
+        return SAVE_DIR + '/' + n;
+      }
+
+      function displayName(key) {
+        var k = String(key == null ? '' : key);
+        return k.indexOf(SAVE_DIR + '/') === 0 ? k.slice(SAVE_DIR.length + 1) : k;
+      }
 
       if (indexedDB.databases) {
         indexedDB.databases().then(function(dbs) {
@@ -418,6 +438,7 @@
       const importBtn = document.getElementById('importSavesBtn');
       const importInput = document.getElementById('importInput');
       const clearBackupsBtn = document.getElementById('clearBackupsBtn');
+      const repairPathsBtn = document.getElementById('repairPathsBtn');
       const tennaBtn = document.getElementById('tennaBtn');
 
       let currentKey = null;
@@ -487,6 +508,7 @@
       }
 
       function putEntry(key, value) {
+        key = normalizeKey(key);
         delete valueCache[key];
         delete valueCache[key + '.bak'];
         return openDB().then(function(db) {
@@ -511,7 +533,9 @@
         });
       }
 
-      function getEntry(key) {
+      // Reads the key exactly as given, without normalisation. Only the path
+      // repair needs this, to fetch a malformed legacy entry verbatim.
+      function getRawEntry(key) {
         return openDB().then(function(db) {
           return new Promise(function(resolve, reject) {
             const tx = db.transaction(STORE, 'readonly');
@@ -520,6 +544,10 @@
             req.onerror = function(e) { db.close(); reject(e.target.error); };
           });
         });
+      }
+
+      function getEntry(key) {
+        return getRawEntry(normalizeKey(key));
       }
 
       function isDirectory(value) {
@@ -591,7 +619,10 @@
 
       function saveSingleFile(key, value) {
         if (!value || !value.contents) { alert('Empty file.'); return; }
-        var name = key.replace(/[\\\/:*?"<>|]/g, '_').replace(/^_+/, '') || 'save';
+        // Export under the bare save name ("filech4_1"), not the mangled full
+        // path ("savedata_filech4_1"), so re-importing the file reproduces the
+        // original key instead of creating a bogus one.
+        var name = displayName(key).replace(/[\\\/:*?"<>|]/g, '_').replace(/^_+/, '') || 'save';
         var blob = new Blob([value.contents], { type: 'application/octet-stream' });
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
@@ -636,7 +667,17 @@
           div.tabIndex = 0;
           var nameSpan = document.createElement('div');
           nameSpan.className = 'save-name';
-          highlightText(nameSpan, key, filter);
+          highlightText(nameSpan, displayName(key), filter);
+          if (key !== normalizeKey(key)) {
+            // Legacy entry written without the /_savedata/ prefix: the game
+            // cannot see it and syncfs will drop it.
+            var badTag = document.createElement('span');
+            badTag.className = 'save-chapter-tag';
+            badTag.textContent = 'not visible to game';
+            badTag.title = 'Stored as "' + key + '" instead of "' + normalizeKey(key) +
+              '". Use "Repair save paths" to fix it.';
+            nameSpan.appendChild(badTag);
+          }
           if (tag) {
             var tagSpan = document.createElement('span');
             tagSpan.className = 'save-chapter-tag';
@@ -859,7 +900,8 @@
       function openEditor(key, value) {
         currentKey = key;
         currentValue = value;
-        editorFilename.textContent = key;
+        editorFilename.textContent = displayName(key);
+        editorFilename.title = key;
         hexPreview.hidden = true;
         editorRestoreBackup.hidden = true;
         editorGoOriginal.hidden = true;
@@ -1032,8 +1074,10 @@
       renameBtn.addEventListener('click', function() {
         if (!currentKey) return;
         if (!checkUnsaved()) return;
-        var newName = prompt('New filename:', currentKey);
-        if (!newName || newName === currentKey) return;
+        var newName = prompt('New filename:', displayName(currentKey));
+        if (!newName) return;
+        var newKey = normalizeKey(newName);
+        if (newKey === currentKey) return;
         if (newName.indexOf('/') !== -1 || newName.indexOf('..') !== -1) {
           alert('Invalid filename.');
           return;
@@ -1041,11 +1085,11 @@
         cloudBusy = true;
         getEntry(currentKey).then(function(val) {
           if (!val) throw new Error('File not found: ' + currentKey);
-          return putEntry(newName, val).then(function() {
+          return putEntry(newKey, val).then(function() {
             return deleteEntry(currentKey);
           }).then(function() {
             invalidateCache();
-            return openEditor(newName, val);
+            return openEditor(newKey, val);
           });
         }).catch(function(err) {
           alert('Error renaming: ' + (err && err.message ? err.message : err));
@@ -1061,13 +1105,14 @@
           alert('Invalid filename.');
           return;
         }
+        var newKey = normalizeKey(name);
         var emptyVal = { contents: new Uint8Array(0), mode: 33206, timestamp: new Date() };
         cloudBusy = true;
-        putEntry(name, emptyVal).then(function() {
+        putEntry(newKey, emptyVal).then(function() {
           invalidateCache();
           return refreshList();
         }).then(function() {
-          return openEditor(name, emptyVal);
+          return openEditor(newKey, emptyVal);
         }).catch(function(err) {
           alert('Error creating file: ' + (err && err.message ? err.message : err));
         }).then(function() {
@@ -1141,6 +1186,78 @@
         });
       });
 
+      // Entries written before keys were normalised are stored under a bare
+      // name, are invisible to the game, and are deleted by the next syncfs.
+      // Move them to their correct /_savedata/ path.
+      function findBrokenKeys() {
+        return listKeys().then(function(keys) {
+          return keys.filter(function(k) {
+            return !k.endsWith('/') && k !== SAVE_DIR && k !== normalizeKey(k);
+          });
+        });
+      }
+
+      function updateRepairButton() {
+        return findBrokenKeys().then(function(broken) {
+          repairPathsBtn.hidden = broken.length === 0;
+          if (broken.length) {
+            repairPathsBtn.textContent = 'Repair save paths (' + broken.length + ')';
+          }
+        }).catch(function() { repairPathsBtn.hidden = true; });
+      }
+
+      repairPathsBtn.addEventListener('click', function() {
+        cloudBusy = true;
+        findBrokenKeys().then(function(broken) {
+          if (!broken.length) { repairPathsBtn.hidden = true; return; }
+          if (!confirm('Repair ' + broken.length + ' save file(s)?\n\n' +
+              'These are stored under a name the game cannot read, so it never loads ' +
+              'them and they are discarded the next time a chapter saves.\n\n' +
+              broken.slice(0, 10).map(function(k) {
+                return '  ' + k + '  →  ' + normalizeKey(k);
+              }).join('\n') + (broken.length > 10 ? '\n  ...' : ''))) {
+            return Promise.reject({ cancelled: true });
+          }
+          var moved = 0, dropped = 0;
+          var chain = Promise.resolve();
+          broken.forEach(function(badKey) {
+            chain = chain.then(function() {
+              var goodKey = normalizeKey(badKey);
+              return getEntry(goodKey).then(function(existing) {
+                if (existing) {
+                  // A real save already lives at the correct path; don't
+                  // clobber it, just remove the stray entry.
+                  dropped++;
+                  return deleteEntry(badKey);
+                }
+                return getRawEntry(badKey).then(function(val) {
+                  if (!val) return;
+                  return putEntry(goodKey, val).then(function() {
+                    moved++;
+                    return deleteEntry(badKey);
+                  });
+                });
+              });
+            });
+          });
+          return chain.then(function() {
+            invalidateCache();
+            return refreshList();
+          }).then(function() {
+            var msg = 'Repaired ' + moved + ' save file(s)' +
+              (dropped ? ', removed ' + dropped + ' duplicate(s)' : '') + '.';
+            if (window.__launcher && window.__launcher.toast) window.__launcher.toast(msg);
+            else alert(msg);
+            return updateRepairButton();
+          });
+        }).catch(function(err) {
+          if (err && err.cancelled) return;
+          alert('Repair failed: ' + (err && err.message ? err.message : err));
+        }).then(function() {
+          cloudBusy = false;
+        });
+      });
+
       clearBackupsBtn.addEventListener('click', function() {
         listAll().then(function(items) {
           var bakItems = items.filter(function(item) { return item.key.endsWith('.bak'); });
@@ -1181,7 +1298,9 @@
           if (e.data && e.data.type === 'tenna-ready' && e.source === tennaWindow) {
             clearTimeout(timeout);
             window.removeEventListener('message', handler);
-            tennaWindow.postMessage({ type: 'tenna-open', saveData: { bytes: bytes, filename: key } }, window.location.origin);
+            // Hand Tenna the bare save name; putEntry normalises whatever comes
+            // back, so the round-trip lands on the correct /_savedata/ path.
+            tennaWindow.postMessage({ type: 'tenna-open', saveData: { bytes: bytes, filename: displayName(key) } }, window.location.origin);
           }
         }
         window.addEventListener('message', handler);
@@ -1225,6 +1344,7 @@
         saveEditor.hidden = true;
         isDirty = false;
         refreshList();
+        updateRepairButton();
         if (saveTimer) clearInterval(saveTimer);
         // Auto-refresh only while the list is showing and there are no unsaved edits.
         // Invalidate the cache first so saves written by the running game are picked up.
