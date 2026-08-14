@@ -54,6 +54,12 @@
       var Module = {
         preRun: [],
         postRun: [],
+        // The game calls this when it ends itself (game_end() / the "End Program"
+        // option in the multi-chapter build). In a normal browser the runner's own
+        // exit does nothing visible, leaving a dead canvas.
+        onExit: function () {
+          quitIfSupported();
+        },
         print: (function () {
           var element = document.getElementById("output");
           if (element) element.value = ""; // clear browser cache
@@ -960,7 +966,17 @@
         lockOrientationIfSupported();
       }
 
+      // Inside the launcher, "Quit" hands control back to the chapter menu. The
+      // old paths (window.oprt.closeTab / the Opera GX extension) exist in
+      // neither this build nor a normal browser, so the button did nothing.
+      function inLauncher() {
+        return window.parent !== window;
+      }
+
       function quitIfSupported() {
+        if (inLauncher()) {
+          try { window.parent.postMessage({ type: 'launcher-quit' }, window.location.origin); return; } catch (e) {}
+        }
         if (window.oprt && window.oprt.closeTab) { /* GX Mobile API */
           window.oprt.closeTab();
         } else if (window.chrome && window.chrome.runtime && window.chrome.runtime.sendMessage) {
@@ -1017,7 +1033,7 @@
       // it never ran at all. The old test also looked at oprt.enterFullscreen, which
       // quitIfSupported() never calls, and chrome.runtime.sendMessage exists in every
       // Chromium browser, so the pause menu kept offering a Quit button that did nothing.
-      if (!(window.oprt && window.oprt.closeTab) &&
+      if (!inLauncher() && !(window.oprt && window.oprt.closeTab) &&
           !(/OPR\//.test(navigator.userAgent) && window.chrome && window.chrome.runtime && window.chrome.runtime.sendMessage)) {
         quitButton.hidden = true;
       }

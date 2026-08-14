@@ -154,7 +154,12 @@
       const logo = document.getElementById('logoContainer');
       let gamestarted = false;
       let backTimer = null;
-      window.__launcher = { isGameStarted: () => gamestarted };
+      window.__launcher = {
+        isGameStarted: () => gamestarted,
+        // The save manager calls this when it closes: the game frame only
+        // receives keys while it holds focus.
+        focusGame: () => { try { iframe.contentWindow.focus(); } catch (e) {} }
+      };
       let selectedChapter = null;
       const rows = () => menu.querySelectorAll('.row');
       const origin = window.location.origin;
@@ -378,8 +383,14 @@
       // handleKeyDown/handleKeyUp, which exist nowhere in the build.
       window.addEventListener('message', function(e) {
         if (e.origin !== origin || e.source !== iframe.contentWindow) return;
-        if (!e.data || e.data.type !== 'launcher-key') return;
-        if (gamestarted) handleLauncherKey(e.data.key);
+        if (!e.data) return;
+        // The frame's speed.js forwards the four launcher-owned keys, and the
+        // chapter pages route the game's own "End Program"/Quit here.
+        if (e.data.type === 'launcher-key') {
+          if (gamestarted) handleLauncherKey(e.data.key);
+        } else if (e.data.type === 'launcher-quit') {
+          if (gamestarted) backToMenu();
+        }
       });
 
       // Keyboard navigation
@@ -1937,6 +1948,11 @@
         // Only the file that was open loses its draft: wiping every draft here
         // destroyed unsaved work on other files that the user never touched.
         clearDraft(lastKey);
+        // Hand the keyboard back to the game: while the modal was open the
+        // launcher document held focus, and the frame only sees keys when it does.
+        if (window.__launcher && window.__launcher.isGameStarted() && window.__launcher.focusGame) {
+          window.__launcher.focusGame();
+        }
         return true;
       }
 

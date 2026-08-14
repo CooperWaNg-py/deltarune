@@ -190,6 +190,19 @@
       window.parent.postMessage({ type: 'launcher-key', key: e.key }, window.location.origin);
     } catch (err) {}
   }, true);
+
+  // Clicking anywhere in the game area must leave the keyboard pointing at the
+  // game: the launcher chrome (settings, save manager, back button) takes focus
+  // away from this frame, and GameMaker only sees keys that reach this window.
+  window.addEventListener('pointerdown', function() {
+    try { window.focus(); } catch (err) {}
+  }, true);
+
+  // NOTE: the launcher-quit route deliberately does NOT go through
+  // window.oprt. Defining that object at all changes how the runner behaves
+  // (it treats it as the Opera GX host API: GXMFS instead of IDBFS for saves,
+  // and a host-driven input/fullscreen model), so the chapter pages post
+  // `launcher-quit` themselves from quitIfSupported().
 })();
 
 // ── Volume control ────────────────────────────────────────────────────────
