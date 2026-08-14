@@ -169,6 +169,8 @@
       const speedSlider = document.getElementById('speedSlider');
       const speedValue = document.getElementById('speedValue');
       const versionTag = document.getElementById('versionTag');
+      // Single source of truth for the version the launcher reports.
+      const LAUNCHER_VERSION = 'v0.3.1';
       // document.lastModified is local-time and can be unparseable; a RangeError
       // here used to abort this whole IIFE, leaving every chapter row's inline
       // onclick="loadChapter(N)" as a ReferenceError.
@@ -176,8 +178,8 @@
         var built = new Date(document.lastModified);
         var stamp = isNaN(built.getTime()) ? '' : ' (' + built.getFullYear() + '-' +
           ('0' + (built.getMonth() + 1)).slice(-2) + '-' + ('0' + built.getDate()).slice(-2) + ')';
-        versionTag.textContent = 'v0.2.2' + stamp;
-      } catch (e) { versionTag.textContent = 'v0.2.2'; }
+        versionTag.textContent = LAUNCHER_VERSION + stamp;
+      } catch (e) { versionTag.textContent = LAUNCHER_VERSION; }
 
       function getSpeed() { var v = parseFloat(localStorage.getItem(SPEED_KEY)); return (isFinite(v) && v > 0) ? v : 1; }
       function setSpeed(v) {
