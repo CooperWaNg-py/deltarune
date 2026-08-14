@@ -171,8 +171,8 @@
         var built = new Date(document.lastModified);
         var stamp = isNaN(built.getTime()) ? '' : ' (' + built.getFullYear() + '-' +
           ('0' + (built.getMonth() + 1)).slice(-2) + '-' + ('0' + built.getDate()).slice(-2) + ')';
-        versionTag.textContent = 'v0.2.2' + stamp;
-      } catch (e) { versionTag.textContent = 'v0.2.2'; }
+        versionTag.textContent = 'v.2' + stamp;
+      } catch (e) { versionTag.textContent = 'v0.2.3'; }
 
       function getSpeed() { var v = parseFloat(localStorage.getItem(SPEED_KEY)); return (isFinite(v) && v > 0) ? v : 1; }
       function setSpeed(v) {
