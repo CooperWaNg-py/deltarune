@@ -817,6 +817,12 @@ progress[value]::-webkit-progress-value {
             var Module = {
                 preRun: [],
                 postRun: [],
+                // The game calls this when it ends itself ("End Program" on the
+                // file select, game_end()). In a normal browser the runner's own
+                // exit does nothing visible, leaving a dead canvas.
+                onExit: function() {
+                    quitIfSupported();
+                },
                 print: (function() {
                     var element = document.getElementById("output");
                     if (element) element.value = "";
@@ -1058,7 +1064,17 @@ progress[value]::-webkit-progress-value {
                 canvasElement.style.transform = "translate(-50%, -50%)";
             }
             
+            // Chapter 5's file select offers "End Program", and the pause menu a
+            // Quit button; both land here. Neither the GX Mobile host API nor the
+            // Opera GX extension exists in a normal browser, so they did nothing.
+            // Inside the launcher, hand control back to its chapter menu.
             function quitIfSupported() {
+                if (window.parent !== window) {
+                    try {
+                        window.parent.postMessage({ type: 'launcher-quit' }, window.location.origin);
+                        return;
+                    } catch (e) {}
+                }
                 if (window.oprt && window.oprt.closeTab) {
                     window.oprt.closeTab();
                 } else if (window.chrome && window.chrome.runtime && window.chrome.runtime.sendMessage) {
@@ -1134,12 +1150,18 @@ if (!Object.prototype.hasOwnProperty.call(deltaruneArchives, requestedChapter)) 
             const chapterAssetPrefix = window.GM_CHAPTER_ASSET_PREFIX || '';
             const chapterExternalFiles = window.GM_CHAPTER_EXTERNAL_FILES || [];
 
+            // The per-chapter external files live under chapterN_windows/, EXCEPT the
+            // cutscene videos: those ship once in test/vid/ and are loaded by a <video>
+            // element, which never passes through the fetch/XHR hooks below. Rewriting
+            // them to chapterN_windows/vid/... would point at a file that does not
+            // exist, so they are excluded here rather than in the generated table.
             function resolveChapterAssetUrl(url) {
                 if (!chapterAssetPrefix || typeof url !== 'string') return url;
                 const queryIndex = url.search(/[?#]/);
                 const path = (queryIndex === -1 ? url : url.slice(0, queryIndex))
                     .replace(/^\.\//, '')
                     .replace(/^\//, '');
+                if (path.indexOf('vid/') === 0) return url;
                 if (!chapterExternalFiles.includes(path)) return url;
                 const suffix = queryIndex === -1 ? '' : url.slice(queryIndex);
                 return `${chapterAssetPrefix}/${path}${suffix}`;
